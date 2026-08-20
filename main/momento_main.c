@@ -1,13 +1,15 @@
-/* Momento button test for the Seeed XIAO ESP32S3 Sense.
+/* Momento button capture for the Seeed XIAO ESP32S3 Sense.
  *
  * Breadboard:
  *   GPIO1 = REC button (to GND, internal pull-up)
  *   GPIO2 = CAM button (to GND, internal pull-up)
- *   GPIO4 = red LED (on = capture in progress)
+ *   GPIO4 = red LED (on = capture or write in progress)
  *   GPIO5/6 = I2C (DRV2605L haptics at 0x5A, scanned at boot)
  *
  * CAM press: one UXGA photo -> /sdcard/PHOTO_NNN.JPG
- * REC press: 5 s VGA video + audio -> /sdcard/VID_NNN.AVI + AUD_NNN.WAV
+ * REC press: start recording; press REC again to stop.
+ *   Saves /sdcard/VID_NNN.AVI + AUD_NNN.WAV. Auto-stop at 30 s or
+ *   when the PSRAM buffer is full (~10-12 s of a typical scene).
  */
 
 #include <stdio.h>
@@ -56,13 +58,13 @@ static const char *TAG = "momento";
 #define PIN_I2C_SDA GPIO_NUM_5
 #define PIN_I2C_SCL GPIO_NUM_6
 
-#define RECORD_US         (5LL * 1000 * 1000)
+#define MAX_RECORD_US     (30LL * 1000 * 1000)
 #define TARGET_FPS        15
 #define FRAME_INTERVAL_US (1000000 / TARGET_FPS)
-#define MAX_FRAMES        90
-#define VIDEO_BUF_BYTES   (6 * 1024 * 1024)
+#define MAX_FRAMES        512
+#define VIDEO_BUF_BYTES   (5 * 1024 * 1024)
 
-#define AUDIO_MAX_BYTES (MIC_SAMPLE_RATE * 2 * 6)
+#define AUDIO_MAX_BYTES (MIC_SAMPLE_RATE * 2 * 32) /* 32 seconds */
 #define AUDIO_GAIN      2
 
 typedef struct {
@@ -188,7 +190,6 @@ static void i2c_scan(void)
     i2c_del_master_bus(bus);
 }
 
-/* Returns the first index where no file with this pattern exists. */
 static int next_index(const char *pattern)
 {
     char path[64];
@@ -252,15 +253,20 @@ static void record_clip(void)
         .cap = AUDIO_MAX_BYTES,
         .done = xSemaphoreCreateBinary(),
     };
-    ESP_LOGI(TAG, "Recording %d seconds...", (int)(RECORD_US / 1000000));
+    ESP_LOGI(TAG, "Recording... press REC again to stop (max %d s)",
+             (int)(MAX_RECORD_US / 1000000));
     xTaskCreate(audio_task, "audio", 4096, &job, 5, NULL);
 
     int64_t t0 = esp_timer_get_time();
     int64_t next_store = t0;
     size_t used = 0;
     size_t frame_count = 0;
+    int rec_high_streak = 0; /* REC must read released before a stop press counts */
+    int rec_low_streak = 0;
+    bool stop_requested = false;
+    const char *stop_reason = "time limit";
 
-    while (esp_timer_get_time() - t0 < RECORD_US) {
+    while (esp_timer_get_time() - t0 < MAX_RECORD_US) {
         camera_fb_t *fb = esp_camera_fb_get();
         if (!fb) {
             continue;
@@ -269,7 +275,7 @@ static void record_clip(void)
         if (now >= next_store) {
             if (frame_count >= MAX_FRAMES ||
                 used + fb->len > VIDEO_BUF_BYTES) {
-                ESP_LOGW(TAG, "Video buffer full, capture stops early");
+                stop_reason = "buffer full";
                 esp_camera_fb_return(fb);
                 break;
             }
@@ -284,15 +290,28 @@ static void record_clip(void)
             }
         }
         esp_camera_fb_return(fb);
+
+        if (gpio_get_level(PIN_BTN_REC) == 1) {
+            rec_high_streak++;
+            rec_low_streak = 0;
+        } else if (rec_high_streak >= 3) {
+            rec_low_streak++;
+            if (rec_low_streak >= 2) {
+                stop_requested = true;
+                stop_reason = "REC pressed";
+                break;
+            }
+        }
     }
+    (void)stop_requested;
     int64_t duration_us = esp_timer_get_time() - t0;
 
     job.stop = true;
     xSemaphoreTake(job.done, pdMS_TO_TICKS(1000));
 
     size_t sample_count = job.captured / 2;
-    ESP_LOGI(TAG, "Captured %u frames and %u audio samples in %.2f s",
-             (unsigned)frame_count, (unsigned)sample_count,
+    ESP_LOGI(TAG, "Stopped (%s): %u frames, %u audio samples, %.2f s",
+             stop_reason, (unsigned)frame_count, (unsigned)sample_count,
              duration_us / 1000000.0f);
 
     int16_t *samples = (int16_t *)audio_buf;
@@ -318,7 +337,6 @@ static void record_clip(void)
     gpio_set_level(PIN_LED, 0);
 }
 
-/* Debounced check: returns true once per press. */
 static bool button_pressed(gpio_num_t pin)
 {
     if (gpio_get_level(pin) != 0) {
@@ -341,7 +359,7 @@ static void wait_release(gpio_num_t pin)
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Momento button test");
+    ESP_LOGI(TAG, "Momento button capture");
     gpio_setup();
     i2c_scan();
 
@@ -360,14 +378,13 @@ void app_main(void)
     }
     skip_frames(10);
 
-    /* Two short LED blinks: ready. */
     for (int i = 0; i < 2; i++) {
         gpio_set_level(PIN_LED, 1);
         vTaskDelay(pdMS_TO_TICKS(120));
         gpio_set_level(PIN_LED, 0);
         vTaskDelay(pdMS_TO_TICKS(120));
     }
-    ESP_LOGI(TAG, "Ready. CAM button (GPIO2) = photo, REC button (GPIO1) = 5 s clip");
+    ESP_LOGI(TAG, "Ready. CAM (GPIO2) = photo. REC (GPIO1) = start/stop recording.");
 
     while (true) {
         if (button_pressed(PIN_BTN_CAM)) {
@@ -375,7 +392,8 @@ void app_main(void)
             take_photo();
             wait_release(PIN_BTN_CAM);
         } else if (button_pressed(PIN_BTN_REC)) {
-            ESP_LOGI(TAG, "REC button pressed");
+            ESP_LOGI(TAG, "REC button pressed, recording starts");
+            wait_release(PIN_BTN_REC);
             record_clip();
             wait_release(PIN_BTN_REC);
         }
