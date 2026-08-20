@@ -3,7 +3,9 @@ idf_component_register(SRCS "momento_main.c"
                             "mic.c"
                             "avi_writer.c"
                             "wav_writer.c"
-                       PRIV_REQUIRES fatfs
+                       PRIV_REQUIRES esp_driver_gpio
+                                     esp_driver_i2c
+                                     fatfs
                                      sdmmc
                                      esp_driver_sdspi
                                      esp_driver_spi

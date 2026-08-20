@@ -1,10 +1,13 @@
-/* Momento SD card recording test for the Seeed XIAO ESP32S3 Sense.
+/* Momento button test for the Seeed XIAO ESP32S3 Sense.
  *
- * Boot sequence:
- *   1. Mount the microSD card and run a write/read smoke test.
- *   2. Record 5 seconds of VGA MJPEG video and 16 kHz mono audio into PSRAM.
- *   3. Write VIDEO.AVI and AUDIO.WAV to the card.
- *   4. Take one photo at each resolution up to UXGA 1600x1200.
+ * Breadboard:
+ *   GPIO1 = REC button (to GND, internal pull-up)
+ *   GPIO2 = CAM button (to GND, internal pull-up)
+ *   GPIO4 = red LED (on = capture in progress)
+ *   GPIO5/6 = I2C (DRV2605L haptics at 0x5A, scanned at boot)
+ *
+ * CAM press: one UXGA photo -> /sdcard/PHOTO_NNN.JPG
+ * REC press: 5 s VGA video + audio -> /sdcard/VID_NNN.AVI + AUD_NNN.WAV
  */
 
 #include <stdio.h>
@@ -14,6 +17,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+#include "driver/gpio.h"
+#include "driver/i2c_master.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -44,13 +49,20 @@ static const char *TAG = "momento";
 #define CAM_PIN_HREF  47
 #define CAM_PIN_PCLK  13
 
+/* Breadboard pins */
+#define PIN_BTN_REC GPIO_NUM_1
+#define PIN_BTN_CAM GPIO_NUM_2
+#define PIN_LED     GPIO_NUM_4
+#define PIN_I2C_SDA GPIO_NUM_5
+#define PIN_I2C_SCL GPIO_NUM_6
+
 #define RECORD_US         (5LL * 1000 * 1000)
 #define TARGET_FPS        15
 #define FRAME_INTERVAL_US (1000000 / TARGET_FPS)
 #define MAX_FRAMES        90
 #define VIDEO_BUF_BYTES   (6 * 1024 * 1024)
 
-#define AUDIO_MAX_BYTES (MIC_SAMPLE_RATE * 2 * 6) /* room for 6 seconds */
+#define AUDIO_MAX_BYTES (MIC_SAMPLE_RATE * 2 * 6)
 #define AUDIO_GAIN      2
 
 typedef struct {
@@ -65,7 +77,7 @@ static void audio_task(void *arg)
 {
     audio_job_t *job = arg;
     while (!job->stop && job->captured < job->cap) {
-        size_t chunk = 3200; /* 100 ms of samples */
+        size_t chunk = 3200;
         if (chunk > job->cap - job->captured) {
             chunk = job->cap - job->captured;
         }
@@ -103,9 +115,7 @@ static esp_err_t camera_start(void)
         .ledc_channel = LEDC_CHANNEL_0,
 
         .pixel_format = PIXFORMAT_JPEG,
-        /* Init at the largest size so the frame buffers fit every
-         * resolution the photo pass uses later. */
-        .frame_size = FRAMESIZE_UXGA,
+        .frame_size = FRAMESIZE_UXGA, /* buffers sized for the largest shot */
         .jpeg_quality = 12,
         .fb_count = 2,
         .fb_location = CAMERA_FB_IN_PSRAM,
@@ -132,32 +142,116 @@ static void skip_frames(int n)
     }
 }
 
-static void log_file_size(const char *path)
+static void gpio_setup(void)
 {
-    struct stat st;
-    if (stat(path, &st) == 0) {
-        ESP_LOGI(TAG, "  %s: %ld bytes", path, (long)st.st_size);
-    } else {
-        ESP_LOGW(TAG, "  %s: missing", path);
-    }
+    gpio_config_t btns = {
+        .pin_bit_mask = (1ULL << PIN_BTN_REC) | (1ULL << PIN_BTN_CAM),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+    };
+    gpio_config(&btns);
+
+    gpio_config_t led = {
+        .pin_bit_mask = 1ULL << PIN_LED,
+        .mode = GPIO_MODE_OUTPUT,
+    };
+    gpio_config(&led);
+    gpio_set_level(PIN_LED, 0);
 }
 
-static void record_av(void)
+static void i2c_scan(void)
+{
+    i2c_master_bus_config_t bus_cfg = {
+        .i2c_port = -1,
+        .sda_io_num = PIN_I2C_SDA,
+        .scl_io_num = PIN_I2C_SCL,
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .flags.enable_internal_pullup = true,
+    };
+    i2c_master_bus_handle_t bus;
+    if (i2c_new_master_bus(&bus_cfg, &bus) != ESP_OK) {
+        ESP_LOGW(TAG, "I2C bus init failed, scan skipped");
+        return;
+    }
+    int found = 0;
+    for (uint8_t addr = 0x08; addr < 0x78; addr++) {
+        if (i2c_master_probe(bus, addr, 50) == ESP_OK) {
+            ESP_LOGI(TAG, "I2C device found at 0x%02X%s", addr,
+                     addr == 0x5A ? " (DRV2605L haptics)" : "");
+            found++;
+        }
+    }
+    if (found == 0) {
+        ESP_LOGW(TAG, "I2C scan: no devices found");
+    }
+    i2c_del_master_bus(bus);
+}
+
+/* Returns the first index where no file with this pattern exists. */
+static int next_index(const char *pattern)
+{
+    char path[64];
+    struct stat st;
+    for (int i = 1; i < 1000; i++) {
+        snprintf(path, sizeof(path), pattern, i);
+        if (stat(path, &st) != 0) {
+            return i;
+        }
+    }
+    return 999;
+}
+
+static void take_photo(void)
+{
+    gpio_set_level(PIN_LED, 1);
+    sensor_t *s = esp_camera_sensor_get();
+    s->set_framesize(s, FRAMESIZE_UXGA);
+    vTaskDelay(pdMS_TO_TICKS(300));
+    skip_frames(2);
+
+    camera_fb_t *fb = esp_camera_fb_get();
+    if (fb) {
+        char path[64];
+        snprintf(path, sizeof(path), SD_MOUNT_POINT "/PHOTO_%03d.JPG",
+                 next_index(SD_MOUNT_POINT "/PHOTO_%03d.JPG"));
+        FILE *f = fopen(path, "wb");
+        if (f) {
+            fwrite(fb->buf, 1, fb->len, f);
+            fclose(f);
+            ESP_LOGI(TAG, "Photo saved: %s (%u bytes)", path, (unsigned)fb->len);
+        } else {
+            ESP_LOGE(TAG, "Cannot open %s", path);
+        }
+        esp_camera_fb_return(fb);
+    } else {
+        ESP_LOGE(TAG, "Photo capture failed");
+    }
+
+    s->set_framesize(s, FRAMESIZE_VGA);
+    skip_frames(1);
+    gpio_set_level(PIN_LED, 0);
+}
+
+static void record_clip(void)
 {
     uint8_t *video_buf = heap_caps_malloc(VIDEO_BUF_BYTES, MALLOC_CAP_SPIRAM);
     uint8_t *audio_buf = heap_caps_malloc(AUDIO_MAX_BYTES, MALLOC_CAP_SPIRAM);
     static avi_frame_ref_t frames[MAX_FRAMES];
     if (!video_buf || !audio_buf) {
         ESP_LOGE(TAG, "PSRAM allocation failed");
+        heap_caps_free(video_buf);
+        heap_caps_free(audio_buf);
         return;
     }
+
+    gpio_set_level(PIN_LED, 1);
 
     audio_job_t job = {
         .buf = audio_buf,
         .cap = AUDIO_MAX_BYTES,
         .done = xSemaphoreCreateBinary(),
     };
-
     ESP_LOGI(TAG, "Recording %d seconds...", (int)(RECORD_US / 1000000));
     xTaskCreate(audio_task, "audio", 4096, &job, 5, NULL);
 
@@ -201,7 +295,6 @@ static void record_av(void)
              (unsigned)frame_count, (unsigned)sample_count,
              duration_us / 1000000.0f);
 
-    /* Software gain with saturation. */
     int16_t *samples = (int16_t *)audio_buf;
     for (size_t i = 0; i < sample_count; i++) {
         int32_t v = samples[i] * AUDIO_GAIN;
@@ -210,70 +303,52 @@ static void record_av(void)
         samples[i] = (int16_t)v;
     }
 
-    wav_write_file(SD_MOUNT_POINT "/AUDIO.WAV", samples, sample_count,
-                   MIC_SAMPLE_RATE);
-    avi_write_mjpeg(SD_MOUNT_POINT "/VIDEO.AVI", video_buf, frames,
-                    frame_count, 640, 480, (uint64_t)duration_us);
+    int idx = next_index(SD_MOUNT_POINT "/VID_%03d.AVI");
+    char wav_path[64], avi_path[64];
+    snprintf(wav_path, sizeof(wav_path), SD_MOUNT_POINT "/AUD_%03d.WAV", idx);
+    snprintf(avi_path, sizeof(avi_path), SD_MOUNT_POINT "/VID_%03d.AVI", idx);
+
+    wav_write_file(wav_path, samples, sample_count, MIC_SAMPLE_RATE);
+    avi_write_mjpeg(avi_path, video_buf, frames, frame_count, 640, 480,
+                    (uint64_t)duration_us);
 
     heap_caps_free(video_buf);
     heap_caps_free(audio_buf);
     vSemaphoreDelete(job.done);
+    gpio_set_level(PIN_LED, 0);
 }
 
-static void photo_pass(void)
+/* Debounced check: returns true once per press. */
+static bool button_pressed(gpio_num_t pin)
 {
-    static const struct {
-        framesize_t size;
-        const char *name;
-        const char *path;
-    } shots[] = {
-        { FRAMESIZE_QVGA, "QVGA 320x240", SD_MOUNT_POINT "/PHOTO_QVGA.JPG" },
-        { FRAMESIZE_VGA, "VGA 640x480", SD_MOUNT_POINT "/PHOTO_VGA.JPG" },
-        { FRAMESIZE_SVGA, "SVGA 800x600", SD_MOUNT_POINT "/PHOTO_SVGA.JPG" },
-        { FRAMESIZE_XGA, "XGA 1024x768", SD_MOUNT_POINT "/PHOTO_XGA.JPG" },
-        { FRAMESIZE_HD, "HD 1280x720", SD_MOUNT_POINT "/PHOTO_HD.JPG" },
-        { FRAMESIZE_SXGA, "SXGA 1280x1024", SD_MOUNT_POINT "/PHOTO_SXGA.JPG" },
-        { FRAMESIZE_UXGA, "UXGA 1600x1200", SD_MOUNT_POINT "/PHOTO_UXGA.JPG" },
-    };
-
-    sensor_t *s = esp_camera_sensor_get();
-    for (size_t i = 0; i < sizeof(shots) / sizeof(shots[0]); i++) {
-        s->set_framesize(s, shots[i].size);
-        vTaskDelay(pdMS_TO_TICKS(300));
-        skip_frames(2);
-
-        camera_fb_t *fb = esp_camera_fb_get();
-        if (!fb) {
-            ESP_LOGW(TAG, "Photo capture failed at %s", shots[i].name);
-            continue;
-        }
-        FILE *f = fopen(shots[i].path, "wb");
-        if (f) {
-            fwrite(fb->buf, 1, fb->len, f);
-            fclose(f);
-            ESP_LOGI(TAG, "Photo %s: %u bytes -> %s", shots[i].name,
-                     (unsigned)fb->len, shots[i].path);
-        } else {
-            ESP_LOGE(TAG, "Cannot open %s", shots[i].path);
-        }
-        esp_camera_fb_return(fb);
+    if (gpio_get_level(pin) != 0) {
+        return false;
     }
+    vTaskDelay(pdMS_TO_TICKS(30));
+    if (gpio_get_level(pin) != 0) {
+        return false;
+    }
+    return true;
+}
+
+static void wait_release(gpio_num_t pin)
+{
+    while (gpio_get_level(pin) == 0) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    vTaskDelay(pdMS_TO_TICKS(50));
 }
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Momento SD recording test starts in 3 seconds");
-    vTaskDelay(pdMS_TO_TICKS(3000));
+    ESP_LOGI(TAG, "Momento button test");
+    gpio_setup();
+    i2c_scan();
 
-    if (sd_card_mount() != ESP_OK) {
-        ESP_LOGE(TAG, "SD card mount failed, test stops");
+    if (sd_card_mount() != ESP_OK || sd_card_smoke_test() != ESP_OK) {
+        ESP_LOGE(TAG, "SD card not ready, test stops");
         return;
     }
-    if (sd_card_smoke_test() != ESP_OK) {
-        ESP_LOGE(TAG, "SD card smoke test failed, test stops");
-        return;
-    }
-
     esp_err_t err = camera_start();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Camera init failed: %s", esp_err_to_name(err));
@@ -283,27 +358,27 @@ void app_main(void)
         ESP_LOGE(TAG, "Microphone init failed, test stops");
         return;
     }
-
-    /* Let auto exposure settle. */
     skip_frames(10);
 
-    record_av();
-    photo_pass();
-
-    ESP_LOGI(TAG, "Files on the card:");
-    log_file_size(SD_MOUNT_POINT "/TEST.TXT");
-    log_file_size(SD_MOUNT_POINT "/AUDIO.WAV");
-    log_file_size(SD_MOUNT_POINT "/VIDEO.AVI");
-    log_file_size(SD_MOUNT_POINT "/PHOTO_QVGA.JPG");
-    log_file_size(SD_MOUNT_POINT "/PHOTO_VGA.JPG");
-    log_file_size(SD_MOUNT_POINT "/PHOTO_SVGA.JPG");
-    log_file_size(SD_MOUNT_POINT "/PHOTO_XGA.JPG");
-    log_file_size(SD_MOUNT_POINT "/PHOTO_HD.JPG");
-    log_file_size(SD_MOUNT_POINT "/PHOTO_SXGA.JPG");
-    log_file_size(SD_MOUNT_POINT "/PHOTO_UXGA.JPG");
-    ESP_LOGI(TAG, "DONE - power off and move the card to the computer");
+    /* Two short LED blinks: ready. */
+    for (int i = 0; i < 2; i++) {
+        gpio_set_level(PIN_LED, 1);
+        vTaskDelay(pdMS_TO_TICKS(120));
+        gpio_set_level(PIN_LED, 0);
+        vTaskDelay(pdMS_TO_TICKS(120));
+    }
+    ESP_LOGI(TAG, "Ready. CAM button (GPIO2) = photo, REC button (GPIO1) = 5 s clip");
 
     while (true) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        if (button_pressed(PIN_BTN_CAM)) {
+            ESP_LOGI(TAG, "CAM button pressed");
+            take_photo();
+            wait_release(PIN_BTN_CAM);
+        } else if (button_pressed(PIN_BTN_REC)) {
+            ESP_LOGI(TAG, "REC button pressed");
+            record_clip();
+            wait_release(PIN_BTN_REC);
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
