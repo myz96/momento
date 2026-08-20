@@ -1,3 +1,12 @@
 idf_component_register(SRCS "momento_main.c"
-                       PRIV_REQUIRES mbedtls
+                            "sd_card.c"
+                            "mic.c"
+                            "avi_writer.c"
+                            "wav_writer.c"
+                       PRIV_REQUIRES fatfs
+                                     sdmmc
+                                     esp_driver_sdspi
+                                     esp_driver_spi
+                                     esp_driver_i2s
+                                     esp_timer
                        INCLUDE_DIRS ".")
