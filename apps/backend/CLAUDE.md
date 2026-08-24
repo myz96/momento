@@ -22,45 +22,6 @@ Planned media processing capabilities (in ideation):
 - **Linter**: ruff
 - **Type Checker**: mypy (optional)
 
-## Scaffold Instructions
-
-When ready to scaffold the backend:
-
-```bash
-cd apps/backend
-
-# Initialize uv project
-uv init
-
-# Add core dependencies
-uv add fastapi uvicorn[standard] python-multipart
-
-# Add dev dependencies
-uv add --dev pytest pytest-asyncio ruff httpx
-
-# Create basic structure
-mkdir -p src/momento_backend tests
-touch src/momento_backend/__init__.py
-touch src/momento_backend/main.py
-touch tests/__init__.py
-touch tests/test_health.py
-```
-
-After scaffolding, the structure will be:
-```
-apps/backend/
-├── src/
-│   └── momento_backend/
-│       ├── __init__.py
-│       └── main.py          # FastAPI app
-├── tests/
-│   ├── __init__.py
-│   └── test_health.py
-├── pyproject.toml
-├── uv.lock
-└── CLAUDE.md
-```
-
 ## Development Commands
 
 After scaffolding:
