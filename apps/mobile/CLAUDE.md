@@ -1,6 +1,6 @@
 # Momento Mobile (Tauri)
 
-Tauri 2.0 cross-platform app for desktop (macOS/Windows/Linux) and mobile (iOS/Android). Rust backend with web frontend.
+Tauri 2.0 app for macOS and iOS. Rust backend with a web frontend. Windows, Linux, and Android support are possible via Tauri but not current targets.
 
 ## Status
 
@@ -41,6 +41,17 @@ apps/mobile/
 ├── package.json
 └── CLAUDE.md
 ```
+
+## Core App Purpose
+
+The companion app is the primary place to review, search, and reflect on captured moments.
+
+Responsibilities:
+- **Sync**: pull photos and voice recordings from the MagSafe device over BLE + Wi-Fi
+- **Timeline**: browse a chronological feed of photos and audio clips
+- **Review**: play voice memos, view photos, add notes or tags
+- **AI assistance** (future): ask natural-language questions about your day, get summaries, find patterns
+- **Cloud relay**: upload to the backend for long-term storage and deeper analysis (future)
 
 ## Development Commands
 
@@ -112,9 +123,10 @@ await invoke('my_command');
 
 ## Integration with Firmware
 
-The mobile app will communicate with the Momento firmware device via:
-- **BLE**: Device discovery, pairing, initial setup
-- **Wi-Fi**: Media sync, firmware updates
+The app pulls media from the Momento device. Primary sync is device → app; cloud is a future step.
+
+- **BLE**: device discovery, pairing, lightweight status checks
+- **Wi-Fi**: bulk media transfer (photos + audio files)
 
 Protocol details will be defined in `packages/` (shared contracts).
 

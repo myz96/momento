@@ -2,6 +2,13 @@
 
 Python FastAPI backend for cloud sync, user accounts, and media processing.
 
+Planned media processing capabilities (in ideation):
+- Audio transcription (Whisper or similar)
+- Image tagging / scene classification
+- Daily / weekly timeline summaries
+- Pattern detection across captured moments
+- AI-assisted question-answering over your lifelog
+
 ## Status
 
 **Not yet scaffolded.** This directory is a placeholder. Follow the setup instructions below when ready to start development.
@@ -155,9 +162,11 @@ async def health():
 
 ## Integration with Firmware
 
-The backend will receive media from devices via:
-- **HTTP POST**: Photo/video upload after device connects to Wi-Fi
-- **WebSocket**: Real-time sync status updates
+The backend will receive media via the mobile app, not directly from the device. Flow: device → app → backend.
+
+When direct device upload is added later, it will likely use:
+- **HTTP POST**: photo/audio upload after device connects to Wi-Fi
+- **WebSocket**: real-time sync status updates
 
 Protocol details will be defined in `packages/` (shared contracts).
 

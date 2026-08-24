@@ -1,6 +1,6 @@
 # Momento Firmware (ESP-IDF)
 
-ESP-IDF 6.1 firmware for the Seeed XIAO ESP32-S3 Sense board. Captures photos and video clips with audio, stores to SD card.
+ESP-IDF 6.1 firmware for the Seeed XIAO ESP32-S3 Sense board mounted on the back of an iPhone via MagSafe. Captures photos and voice recordings throughout the day, storing them on an SD card for later sync to the companion app.
 
 ## Hardware
 
@@ -22,6 +22,19 @@ ESP-IDF 6.1 firmware for the Seeed XIAO ESP32-S3 Sense board. Captures photos an
 | I2C SCL | GPIO6 |
 
 Camera pins are defined in `momento_main.c` (CAM_PIN_* macros).
+
+## User Interaction Model
+
+The device is operated one-handed, often without looking at it.
+
+| Button | Action | Haptic Pattern | Result |
+|--------|--------|----------------|--------|
+| **Shutter button** (GPIO1) | Single click | Short pulse | Capture one photo (JPEG) |
+| **Audio button** (GPIO2) | Single click | Double pulse | Toggle start/stop audio recording (WAV) |
+
+The haptic feedback is intentionally different between buttons so the user knows which one they pressed without looking.
+
+> Video recording is not currently implemented.
 
 ## Build & Flash
 

@@ -1,6 +1,8 @@
 # Momento Monorepo
 
-This is a polyglot monorepo for Momento — a camera/audio capture device with embedded firmware, mobile/desktop companion app, and cloud backend.
+This is a polyglot monorepo for Momento — a camera/audio capture device that mounts to the back of an iPhone via MagSafe. It captures photos and voice recordings throughout the day so users can review their moments later, with optional AI-assisted analysis for pattern detection and summarization.
+
+The companion app runs on macOS and iOS (built with Tauri 2.0). The firmware lives on an ESP32-S3 with an SD card. Media sync is device → app first; cloud upload will come later.
 
 ## Project Structure
 
@@ -34,11 +36,13 @@ ESP-IDF firmware for Seeed XIAO ESP32-S3 Sense board. Captures photos and video 
 **Details**: See `apps/firmware/CLAUDE.md`
 
 ### Mobile (`apps/mobile/`)
-Tauri 2.0 cross-platform app for desktop (macOS/Windows/Linux) and mobile (iOS/Android). Rust backend with web frontend (framework TBD when scaffolded).
+Tauri 2.0 app for macOS and iOS. Rust backend with a web frontend. Currently a placeholder — see `apps/mobile/CLAUDE.md` for scaffold instructions.
 
-**Tech**: Tauri 2.0, Rust, web frontend
-**Build**: Not yet scaffolded — see `apps/mobile/CLAUDE.md` for setup instructions
+**Tech**: Tauri 2.0, Rust, web frontend (React/Vue/Svelte TBD)
+**Build**: Not yet scaffolded — see `apps/mobile/CLAUDE.md`
 **Details**: See `apps/mobile/CLAUDE.md`
+
+> Tauri supports Windows, Linux, and Android, but Momento targets macOS and iOS for now.
 
 ### Backend (`apps/backend/`)
 Python FastAPI backend for cloud sync, user accounts, media processing. Not yet scaffolded.
@@ -92,7 +96,8 @@ Each sub-app defines its own style in its CLAUDE.md. No cross-app style enforcem
 
 ## Device Communication Protocol
 
-The firmware communicates with the mobile app and backend. Protocol details will be documented in `packages/` when defined. Expected:
-- Bluetooth Low Energy (BLE) for mobile app pairing
-- Wi-Fi/HTTP for backend sync
-- Media format conventions (JPEG, AVI, WAV)
+The firmware communicates with the mobile app and (eventually) the backend. Protocol details will be documented in `packages/` when defined. Expected:
+- **Bluetooth Low Energy (BLE)**: device discovery, pairing, initial setup
+- **Wi-Fi**: bulk media sync from device → app
+- **Cloud sync**: app → backend will come later
+- **Media formats**: JPEG (photos), WAV (audio). Video may be added later.
