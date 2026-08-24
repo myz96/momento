@@ -16,47 +16,19 @@
 # Log files
 *.log
 
-# Build artifacts and directories
-**/build/
-build/
+# General build artifacts
 *.o
 *.a
 *.out
-*.exe # For any host-side utilities compiled on Windows
+*.exe
 
-# ESP-IDF specific build outputs
-*.bin
-*.elf
-*.map
-flasher_args.json # Generated in build directory
-sdkconfig.old
-sdkconfig
-
-# ESP-IDF dependencies
-# For older versions or manual component management
-/components/.idf/
-**/components/.idf/
-# For modern ESP-IDF component manager
-managed_components/
-# If ESP-IDF tools are installed/referenced locally to the project
-.espressif/
-
-# CMake generated files
-CMakeCache.txt
-CMakeFiles/
-cmake_install.cmake
-install_manifest.txt
-CTestTestfile.cmake
-
-# Python environment files
+# Python
 *.pyc
 *.pyo
 *.pyd
 __pycache__/
 *.egg-info/
 dist/
-
-# Virtual environment folders
 venv/
 .venv/
 env/
@@ -66,13 +38,17 @@ env/
 .ccls-cache/
 compile_commands.json
 
-# Windows specific
+# Windows
 Thumbs.db
 ehthumbs.db
 Desktop.ini
 
-# User-specific configuration files
+# User-specific config
 *.user
-*.workspace # General workspace files, can be from various tools
-*.suo       # Visual Studio Solution User Options
-*.sln.docstates # Visual Studio
+*.workspace
+*.suo
+*.sln.docstates
+
+# IDE
+.idea/
+*.iml

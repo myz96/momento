@@ -1,0 +1,23 @@
+# ESP-IDF build outputs
+*.bin
+*.elf
+*.map
+flasher_args.json
+sdkconfig
+sdkconfig.old
+
+# ESP-IDF dependencies
+managed_components/
+.espressif/
+/components/.idf/
+**/components/.idf/
+
+# ESP-IDF build directory
+build/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake

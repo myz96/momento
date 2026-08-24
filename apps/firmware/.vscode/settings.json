@@ -23,15 +23,13 @@
     "board/esp32s3-builtin.cfg"
   ],
   "idf.port": "/dev/tty.usbmodem2101",
-  "idf.currentSetup": "/Users/michaelzhao/.espressif/v6.1-beta1/esp-idf",
   "idf.customExtraVars": {
     "IDF_TARGET": "esp32s3"
   },
-  "clangd.path": "/Users/michaelzhao/.espressif/tools/esp-clangd/esp-21.1.3_20260408/esp-clangd/bin/clangd",
   "clangd.arguments": [
     "--background-index",
     "--query-driver=**",
-    "--compile-commands-dir=/Users/michaelzhao/momento/build"
+    "--compile-commands-dir=${workspaceFolder}/apps/firmware/build"
   ],
   "idf.flashType": "UART"
 }

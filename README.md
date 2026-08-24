@@ -1,82 +1,85 @@
-| Supported Targets | ESP32 | ESP32-C2 | ESP32-C3 | ESP32-C5 | ESP32-C6 | ESP32-C61 | ESP32-H2 | ESP32-H21 | ESP32-H4 | ESP32-P4 | ESP32-S2 | ESP32-S3 | ESP32-S31 |
-| ----------------- | ----- | -------- | -------- | -------- | -------- | --------- | -------- | --------- | -------- | -------- | -------- | -------- | --------- |
+# Momento
 
-# _LEDC Basic Example_
+A camera/audio capture device with embedded firmware, mobile/desktop companion app, and cloud backend.
 
-(See the README.md file in the upper level 'examples' directory for more information about examples.)
+## Project Structure
 
-This example shows how to use the LEDC to generate a PWM signal using the `LOW SPEED` mode.
-To use `HIGH SPEED` mode check if the selected SoC supports this mode.
-
-## How to use example
-
-### Hardware Required
-
-* A development board with any Espressif SoC (e.g., ESP32-DevKitC, ESP-WROVER-KIT, etc.)
-* A USB cable for power supply and programming
-
-Connect the GPIO to an oscilloscope to see the generated signal:
-
-|ledc channel| GPIO  |
-|:----------:|:-----:|
-| Channel 0  | GPIO2 |
-
-### Configure the project
-
-The example uses fixed PWM frequency of 4 kHz, duty cycle in 50%, and output GPIO pin. To change them, adjust `LEDC_FREQUENCY`, `LEDC_DUTY`, `LEDC_OUTPUT_IO` macros at the top of ledc_basic_example_main.c.
-
-Depending on the selected `LEDC_FREQUENCY`, you will need to change the `LEDC_DUTY_RES`.
-
-To dynamically set the duty and frequency, you can use the following functions:
-
-To set the frequency to 2.5 kHZ i.e:
-
-```c
-ledc_set_freq(LEDC_MODE, LEDC_TIMER, 2500);
+```
+momento/
+├── apps/
+│   ├── firmware/     # ESP-IDF firmware (ESP32-S3)
+│   ├── mobile/       # Tauri mobile/desktop app
+│   └── backend/      # Python backend API
+├── packages/         # Shared contracts, protocols, types
+├── CLAUDE.md         # AI agent context (monorepo overview)
+├── opencode.json     # opencode config
+└── justfile          # Cross-app task runner
 ```
 
-Now set the duty to 100% i.e:
+## Quick Start
 
-```c
-ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, 8192);
-ledc_update_duty(LEDC_MODE, LEDC_CHANNEL);
-```
+### Prerequisites
 
-To change the duty cycle you need to calculate the duty range according to the duty resolution.
+- **just**: `brew install just`
+- **Firmware**: ESP-IDF 6.1 (or use the devcontainer)
+- **Mobile**: Rust, Node.js, pnpm (when scaffolded)
+- **Backend**: Python 3.12, uv (when scaffolded)
 
-If duty resolution is 13 bits:
-
-Duty range: `0 to (2 ** 13) = 8191` where 0 is 0% and 8192 is 100%.
-
-### Build and Flash
-
-* [ESP-IDF Getting Started Guide](https://idf.espressif.com/)
-
-Build the project and flash it to the board, then run monitor tool to view serial output:
+### Build Firmware
 
 ```bash
-idf.py -p PORT flash monitor
+just firmware-build
 ```
 
-(To exit the serial monitor, type ``Ctrl-]``.)
+### Flash to Device
 
-See the Getting Started Guide for full steps to configure and use ESP-IDF to build projects.
+```bash
+just firmware-flash
+```
 
-## Example Output
+### View All Tasks
 
-Running this example, you will see the PWM signal with a duty cycle of 50%.
+```bash
+just
+```
 
-![PWM](image/ledc_pwm_signal.png)
+## Sub-Apps
 
-## Troubleshooting
+| App | Description | Status |
+|-----|-------------|--------|
+| [firmware](./apps/firmware/) | ESP-IDF firmware for Seeed XIAO ESP32-S3 Sense | Active |
+| [mobile](./apps/mobile/) | Tauri cross-platform app | Not scaffolded |
+| [backend](./apps/backend/) | Python FastAPI backend | Not scaffolded |
 
-* Duty Resolution
+## Hardware
 
-    * If you get the following error log `ledc: requested frequency and duty resolution can not be achieved, try reducing freq_hz or duty_resolution.` you need to change the `LEDC_DUTY_RES` to a lower resolution and change the range of the duty.
+The firmware targets the **Seeed XIAO ESP32-S3 Sense**:
+- ESP32-S3 @ 240 MHz
+- 8 MB flash, 8 MB octal PSRAM
+- OV2640/OV5640 camera
+- I2S PDM MEMS microphone
+- MicroSD card slot
 
-* Programming fail
+## Media Output
 
-    * Hardware connection is not correct: run `idf.py -p PORT monitor`, and reboot your board to see if there are any output logs.
-    * The baud rate for downloading is too high: lower your baud rate in the `menuconfig` menu, and try again.
+- **Photos**: JPEG (UXGA 1600×1200) → `/sdcard/PHOTO_NNN.JPG`
+- **Video**: MJPEG AVI (VGA 640×480 @ 15fps) → `/sdcard/VID_NNN.AVI`
+- **Audio**: WAV (16 kHz, 16-bit mono) → `/sdcard/AUD_NNN.WAV`
 
-For any technical queries, please open an [issue](https://github.com/espressif/esp-idf/issues) on GitHub. We will get back to you soon.
+## Development
+
+### Using Devcontainer (Recommended for Firmware)
+
+Open in VS Code with the Dev Containers extension. Provides ESP-IDF 6.1 environment.
+
+### Using opencode/Claude Code
+
+This repo includes `CLAUDE.md` files for AI agent context:
+- Root `CLAUDE.md` — Monorepo overview, build order, shared concerns
+- `apps/*/CLAUDE.md` — Sub-app specific conventions and commands
+
+opencode is configured via `opencode.json` to auto-load all sub-app context files.
+
+## License
+
+MIT
