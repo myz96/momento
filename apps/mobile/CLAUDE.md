@@ -13,35 +13,6 @@ Tauri 2.0 app for macOS and iOS. Rust backend with a web frontend. Windows, Linu
 - **Package Manager**: cargo (Rust) + pnpm (JS)
 - **Build**: `cargo tauri dev` / `cargo tauri build`
 
-## Scaffold Instructions
-
-When ready to scaffold the mobile app:
-
-```bash
-cd apps/mobile
-
-# Option A: Interactive scaffolding (recommended for first-time)
-pnpm create tauri-app@latest .
-
-# Option B: With specific frontend framework
-pnpm create tauri-app@latest . --template react-ts
-pnpm create tauri-app@latest . --template vue-ts
-pnpm create tauri-app@latest . --template svelte-ts
-```
-
-After scaffolding, the structure will be:
-```
-apps/mobile/
-├── src/                 # Web frontend source
-├── src-tauri/           # Rust backend
-│   ├── src/
-│   │   └── main.rs      # Tauri entry point
-│   ├── Cargo.toml
-│   └── tauri.conf.json
-├── package.json
-└── CLAUDE.md
-```
-
 ## Core App Purpose
 
 The companion app is the primary place to review, search, and reflect on captured moments.
@@ -77,11 +48,11 @@ just mobile-build
 
 ## Project Structure (Expected)
 
-| Directory | Purpose |
-|-----------|---------|
-| `src/` | Web frontend (React/Vue/Svelte components, pages, state) |
-| `src-tauri/src/` | Rust backend (Tauri commands, IPC handlers, native integrations) |
-| `src-tauri/tauri.conf.json` | Tauri config (app name, windows, permissions) |
+| Directory                   | Purpose                                                          |
+| --------------------------- | ---------------------------------------------------------------- |
+| `src/`                      | Web frontend (React/Vue/Svelte components, pages, state)         |
+| `src-tauri/src/`            | Rust backend (Tauri commands, IPC handlers, native integrations) |
+| `src-tauri/tauri.conf.json` | Tauri config (app name, windows, permissions)                    |
 
 ## Tauri Commands (Rust)
 
