@@ -7,6 +7,8 @@
  *   GPIO5/6 = I2C (DRV2605L haptics at 0x5A, scanned at boot)
  *
  * CAM press: one UXGA photo -> /sdcard/PHOTO_NNN.JPG
+ * CAM hold (>= 1.5 s): toggle Wi-Fi sync mode (SoftAP + HTTP file
+ *   server, LED blinks). Hold CAM again to leave sync mode.
  * REC press: start recording; press REC again to stop.
  *   Saves /sdcard/VID_NNN.AVI + AUD_NNN.WAV. Auto-stop at 30 s or
  *   when the PSRAM buffer is full (~10-12 s of a typical scene).
@@ -25,11 +27,13 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_camera.h"
+#include "nvs_flash.h"
 
 #include "avi_writer.h"
 #include "mic.h"
 #include "sd_card.h"
 #include "wav_writer.h"
+#include "wifi_sync.h"
 
 static const char *TAG = "momento";
 
@@ -66,6 +70,8 @@ static const char *TAG = "momento";
 
 #define AUDIO_MAX_BYTES (MIC_SAMPLE_RATE * 2 * 32) /* 32 seconds */
 #define AUDIO_GAIN      2
+
+#define SYNC_HOLD_MS 1500 /* CAM held this long toggles sync mode */
 
 typedef struct {
     uint8_t *buf;
@@ -357,11 +363,65 @@ static void wait_release(gpio_num_t pin)
     vTaskDelay(pdMS_TO_TICKS(50));
 }
 
+/* Returns true when CAM stays pressed for SYNC_HOLD_MS. Returns false as
+ * soon as the button is released earlier (a short press). */
+static bool cam_hold_is_long(void)
+{
+    int held_ms = 0;
+    while (gpio_get_level(PIN_BTN_CAM) == 0) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+        held_ms += 20;
+        if (held_ms >= SYNC_HOLD_MS) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Runs sync mode until CAM is held again. The LED blinks the whole time. */
+static void sync_mode(void)
+{
+    if (wifi_sync_start() != ESP_OK) {
+        for (int i = 0; i < 5; i++) { /* fast error blink */
+            gpio_set_level(PIN_LED, 1);
+            vTaskDelay(pdMS_TO_TICKS(60));
+            gpio_set_level(PIN_LED, 0);
+            vTaskDelay(pdMS_TO_TICKS(60));
+        }
+        return;
+    }
+
+    bool led_on = false;
+    while (true) {
+        led_on = !led_on;
+        gpio_set_level(PIN_LED, led_on);
+        if (button_pressed(PIN_BTN_CAM)) {
+            if (cam_hold_is_long()) {
+                wait_release(PIN_BTN_CAM);
+                break;
+            }
+            wait_release(PIN_BTN_CAM);
+        }
+        vTaskDelay(pdMS_TO_TICKS(250));
+    }
+
+    wifi_sync_stop();
+    gpio_set_level(PIN_LED, 0);
+}
+
 void app_main(void)
 {
     ESP_LOGI(TAG, "Momento button capture");
     gpio_setup();
     i2c_scan();
+
+    esp_err_t nvs_err = nvs_flash_init();
+    if (nvs_err == ESP_ERR_NVS_NO_FREE_PAGES ||
+        nvs_err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        nvs_err = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(nvs_err);
 
     if (sd_card_mount() != ESP_OK || sd_card_smoke_test() != ESP_OK) {
         ESP_LOGE(TAG, "SD card not ready, test stops");
@@ -384,13 +444,19 @@ void app_main(void)
         gpio_set_level(PIN_LED, 0);
         vTaskDelay(pdMS_TO_TICKS(120));
     }
-    ESP_LOGI(TAG, "Ready. CAM (GPIO2) = photo. REC (GPIO1) = start/stop recording.");
+    ESP_LOGI(TAG, "Ready. CAM = photo, hold CAM = sync mode. REC = start/stop recording.");
 
     while (true) {
         if (button_pressed(PIN_BTN_CAM)) {
-            ESP_LOGI(TAG, "CAM button pressed");
-            take_photo();
-            wait_release(PIN_BTN_CAM);
+            if (cam_hold_is_long()) {
+                ESP_LOGI(TAG, "CAM held, sync mode toggles on");
+                wait_release(PIN_BTN_CAM);
+                sync_mode();
+            } else {
+                ESP_LOGI(TAG, "CAM button pressed");
+                take_photo();
+                wait_release(PIN_BTN_CAM);
+            }
         } else if (button_pressed(PIN_BTN_REC)) {
             ESP_LOGI(TAG, "REC button pressed, recording starts");
             wait_release(PIN_BTN_REC);

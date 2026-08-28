@@ -30,11 +30,23 @@ The device is operated one-handed, often without looking at it.
 | Button | Action | Haptic Pattern | Result |
 |--------|--------|----------------|--------|
 | **Shutter button** (GPIO1) | Single click | Short pulse | Capture one photo (JPEG) |
+| **Shutter button** (GPIO1) | Hold 1.5 s | — | Toggle Wi-Fi sync mode (LED blinks) |
 | **Audio button** (GPIO2) | Single click | Double pulse | Toggle start/stop audio recording (WAV) |
 
 The haptic feedback is intentionally different between buttons so the user knows which one they pressed without looking.
 
 > Video recording is not currently implemented.
+
+## Wi-Fi Sync Mode
+
+Hold the shutter button for 1.5 s to toggle sync mode. The device starts a
+SoftAP (SSID `Momento`, password `momento123`) and an HTTP file server at
+`http://192.168.4.1`. The status LED blinks while sync mode is on. The
+companion app downloads each file, verifies the size, and then deletes it
+from the SD card.
+
+The HTTP API contract lives in `packages/device-protocol/README.md`.
+Implementation: `main/wifi_sync.c`.
 
 ## Build & Flash
 
@@ -68,7 +80,8 @@ apps/firmware/
 │   ├── sd_card.c/h       # SD card mount and test
 │   ├── mic.c/h           # I2S PDM microphone driver
 │   ├── avi_writer.c/h    # MJPEG AVI file writer
-│   └── wav_writer.c/h    # WAV audio file writer
+│   ├── wav_writer.c/h    # WAV audio file writer
+│   └── wifi_sync.c/h     # Sync mode: SoftAP + HTTP file server
 ├── .devcontainer/       # Docker devcontainer for ESP-IDF
 └── .vscode/             # VSCode settings for ESP-IDF extension
 ```
