@@ -4,14 +4,35 @@ Tauri 2.0 app for macOS and iOS. Rust backend with a web frontend. Windows, Linu
 
 ## Status
 
-**Not yet scaffolded.** This directory is a placeholder. Follow the setup instructions below when ready to start development.
+**Scaffolded, first feature built.** The app syncs media from the device over
+Wi-Fi and shows it in a gallery. See "Device Sync" below.
 
 ## Tech Stack
 
 - **Backend**: Rust via Tauri 2.0
-- **Frontend**: Web (React/Vue/Svelte — choose when scaffolding)
+- **Frontend**: React 19 + Vite + TypeScript
 - **Package Manager**: cargo (Rust) + pnpm (JS)
-- **Build**: `cargo tauri dev` / `cargo tauri build`
+- **Build**: `pnpm tauri dev` / `pnpm tauri build`
+
+## Device Sync
+
+The contract is in `packages/device-protocol/README.md`. The flow:
+
+1. The user holds the CAM button on the device for 1.5 s. The device starts
+   the `Momento` Wi-Fi access point (password `momento123`).
+2. The user joins that network and presses **Sync now** in the app.
+3. Rust command `sync_device` downloads each file from
+   `http://192.168.4.1`, verifies the byte count, stores it under
+   `$APPDATA/media/` with an epoch-ms prefix, then deletes it from the
+   device. Progress streams to the UI over a `Channel`.
+4. The gallery (`src/App.tsx`) lists local media: photos render inline,
+   WAV files play in an `<audio>` element, AVI clips open in an external
+   player via `open_media` (web views do not decode MJPEG AVI).
+
+Rust commands live in `src-tauri/src/lib.rs`: `device_info`, `sync_device`,
+`list_local_media`, `open_media`. The asset protocol is scoped to
+`$APPDATA/media/**` in `tauri.conf.json` so the webview can load local
+media with `convertFileSrc`.
 
 ## Core App Purpose
 

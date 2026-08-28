@@ -1,49 +1,168 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import { invoke } from "@tauri-apps/api/core";
+import { useCallback, useEffect, useState } from "react";
+import { Channel, convertFileSrc, invoke } from "@tauri-apps/api/core";
 import "./App.css";
 
-function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+type DeviceInfo = { device: string; files: number; total_bytes: number };
+type SyncProgress = { file: string; index: number; total: number };
+type LocalFile = {
+  name: string;
+  path: string;
+  size: number;
+  kind: string;
+  modified_ms: number;
+};
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatDate(ms: number): string {
+  if (!ms) return "";
+  return new Date(ms).toLocaleString();
+}
+
+function displayName(name: string): string {
+  // Local files carry a "<epoch-ms>_" prefix; hide it in the UI.
+  return name.replace(/^\d+_/, "");
+}
+
+function App() {
+  const [base, setBase] = useState("http://192.168.4.1");
+  const [status, setStatus] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [media, setMedia] = useState<LocalFile[]>([]);
+
+  const refreshMedia = useCallback(async () => {
+    try {
+      setMedia(await invoke<LocalFile[]>("list_local_media"));
+    } catch (e) {
+      setError(String(e));
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshMedia();
+  }, [refreshMedia]);
+
+  async function checkDevice() {
+    setBusy(true);
+    setError("");
+    setStatus("Contacting the device…");
+    try {
+      const i = await invoke<DeviceInfo>("device_info", { base });
+      setStatus(
+        `Device found: ${i.files} file(s), ${formatBytes(i.total_bytes)}.`,
+      );
+    } catch (e) {
+      setStatus("");
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function syncNow() {
+    setBusy(true);
+    setError("");
+    setStatus("Starting sync…");
+    const onProgress = new Channel<SyncProgress>();
+    onProgress.onmessage = (p) => {
+      setStatus(`Syncing ${p.index}/${p.total} — ${p.file}`);
+    };
+    try {
+      const synced = await invoke<LocalFile[]>("sync_device", {
+        base,
+        onProgress,
+      });
+      setStatus(
+        synced.length === 0
+          ? "The device has no files."
+          : `Synced ${synced.length} file(s). The device storage is clear.`,
+      );
+      await refreshMedia();
+    } catch (e) {
+      setError(String(e));
+      setStatus("");
+      await refreshMedia();
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
     <main className="container">
-      <h1>Welcome to Tauri + React</h1>
+      <header>
+        <h1>Momento</h1>
+        <p className="subtitle">Your captured moments, synced from the device.</p>
+      </header>
 
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
+      <section className="device-panel">
+        <h2>Device</h2>
+        <p className="hint">
+          Hold the CAM button on the device for 1.5 s, then join the{" "}
+          <strong>Momento</strong> Wi-Fi network (password{" "}
+          <code>momento123</code>).
+        </p>
+        <div className="row">
+          <input
+            value={base}
+            onChange={(e) => setBase(e.currentTarget.value)}
+            placeholder="http://192.168.4.1"
+            disabled={busy}
+          />
+          <button onClick={checkDevice} disabled={busy}>
+            Check device
+          </button>
+          <button className="primary" onClick={syncNow} disabled={busy}>
+            Sync now
+          </button>
+        </div>
+        {status && <p className="status">{status}</p>}
+        {error && <p className="error">{error}</p>}
+      </section>
 
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
+      <section>
+        <div className="gallery-head">
+          <h2>Library</h2>
+          <span className="count">{media.length} item(s)</span>
+        </div>
+        {media.length === 0 ? (
+          <p className="hint">No media yet. Sync the device to fill this list.</p>
+        ) : (
+          <div className="gallery">
+            {media.map((m) => (
+              <div className="card" key={m.path}>
+                {m.kind === "photo" && (
+                  <img src={convertFileSrc(m.path)} alt={displayName(m.name)} />
+                )}
+                {m.kind === "audio" && (
+                  <div className="audio-box">
+                    <span className="badge">Voice</span>
+                    <audio controls src={convertFileSrc(m.path)} />
+                  </div>
+                )}
+                {m.kind === "video" && (
+                  <div className="video-box">
+                    <span className="badge">Clip</span>
+                    <button onClick={() => invoke("open_media", { path: m.path })}>
+                      Open in player
+                    </button>
+                  </div>
+                )}
+                <div className="meta">
+                  <span className="name">{displayName(m.name)}</span>
+                  <span className="sub">
+                    {formatBytes(m.size)} · {formatDate(m.modified_ms)}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
     </main>
   );
 }
