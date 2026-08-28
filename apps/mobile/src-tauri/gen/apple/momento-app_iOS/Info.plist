@@ -22,6 +22,14 @@
 	<true/>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Momento uses Bluetooth to set up the capture device's Wi-Fi connection.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Momento talks to the capture device on your local network to sync photos and recordings.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_http._tcp</string>
+	</array>
 	<key>UIRequiredDeviceCapabilities</key>
 	<array>
 		<string>arm64</string>
