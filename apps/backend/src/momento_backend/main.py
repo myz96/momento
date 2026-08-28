@@ -1,6 +1,9 @@
 from fastapi import FastAPI
 
+from momento_backend.media import router as media_router
+
 app = FastAPI(title="Momento Backend")
+app.include_router(media_router)
 
 
 @app.get("/")

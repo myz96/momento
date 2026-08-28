@@ -1,168 +1,42 @@
-# Momento Backend (Python)
+# Momento Backend (FastAPI)
 
-Python FastAPI backend for cloud sync, user accounts, and media processing.
+Python 3.12 + FastAPI backend. Receives media backups from the companion
+app and stores them on disk. Runs locally for now; a cloud host and object
+storage come later behind the same routes.
 
-Planned media processing capabilities (in ideation):
-- Audio transcription (Whisper or similar)
-- Image tagging / scene classification
-- Daily / weekly timeline summaries
-- Pattern detection across captured moments
-- AI-assisted question-answering over your lifelog
-
-## Status
-
-**Not yet scaffolded.** This directory is a placeholder. Follow the setup instructions below when ready to start development.
-
-## Tech Stack
-
-- **Language**: Python 3.12
-- **Framework**: FastAPI
-- **Package Manager**: uv
-- **Test Runner**: pytest
-- **Linter**: ruff
-- **Type Checker**: mypy (optional)
-
-## Development Commands
-
-After scaffolding:
+## Commands
 
 ```bash
-# Run development server
-uv run uvicorn momento_backend.main:app --reload
-
-# Run tests
-uv run pytest
-
-# Lint
-uv run ruff check .
-uv run ruff format .
-
-# Type check (if using mypy)
-uv run mypy src/
+just backend-dev    # uv run uvicorn --app-dir src momento_backend.main:app --reload
+just backend-test   # uv run pytest
+just backend-lint   # uv run ruff check .
 ```
 
-Or use the justfile from repo root:
-```bash
-just backend-dev
-just backend-test
-just backend-lint
-```
+## API
 
-## FastAPI Project Structure (Recommended)
+| Route | Method | Purpose |
+|-------|--------|---------|
+| `/health` | GET | liveness check |
+| `/media` | POST | multipart upload of one media file |
+| `/media` | GET | list stored files `[{"name","size"}]` |
+| `/media/{name}` | GET | download one file |
 
-```
-src/momento_backend/
-├── __init__.py
-├── main.py              # App factory, route registration
-├── config.py            # Settings via pydantic-settings
-├── routers/
-│   ├── __init__.py
-│   ├── auth.py          # User auth endpoints
-│   ├── devices.py       # Device registration/pairing
-│   └── media.py         # Media sync endpoints
-├── models/
-│   ├── __init__.py
-│   └── user.py          # Pydantic models / SQLAlchemy schemas
-├── services/
-│   ├── __init__.py
-│   └── sync.py          # Business logic
-└── db/
-    ├── __init__.py
-    └── session.py       # Database session management
-```
+Only `.jpg`, `.jpeg`, `.wav`, `.avi` names are accepted. `safe_name`
+rejects anything that could escape the storage directory.
 
-## pyproject.toml Template
+## Storage
 
-```toml
-[project]
-name = "momento-backend"
-version = "0.1.0"
-requires-python = ">=3.12"
-dependencies = [
-    "fastapi",
-    "uvicorn[standard]",
-]
+Files land in `MOMENTO_MEDIA_DIR` (default `data/media`, gitignored).
+The app skips uploads for names the backend already lists, so repeated
+backups are cheap and safe.
 
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+## Layout
 
-[tool.ruff]
-line-length = 88
-target-version = "py312"
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B"]
-
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-```
-
-## Minimal FastAPI App
-
-`src/momento_backend/main.py`:
-
-```python
-from fastapi import FastAPI
-
-app = FastAPI(title="Momento Backend")
-
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
-```
-
-## Python Coding Conventions
-
-- Use type hints on all function signatures
-- Prefer Pydantic models for request/response validation
-- Use async/await for all I/O operations
-- Run `ruff format .` before commits
-- Run `ruff check .` and fix all warnings
-- Tests: one test file per router/module, use `pytest-asyncio`
-
-## Integration with Firmware
-
-The backend will receive media via the mobile app, not directly from the device. Flow: device → app → backend.
-
-When direct device upload is added later, it will likely use:
-- **HTTP POST**: photo/audio upload after device connects to Wi-Fi
-- **WebSocket**: real-time sync status updates
-
-Protocol details will be defined in `packages/` (shared contracts).
-
-## Integration with Mobile App
-
-The backend will expose:
-- REST API for user accounts, device management, media browsing
-- WebSocket for real-time notifications
-
-API contracts will be defined in `packages/` (OpenAPI spec).
-
-## Environment Variables
-
-Expected `.env` file:
-```
-DATABASE_URL=postgresql://...
-SECRET_KEY=...
-ALLOWED_ORIGINS=http://localhost:3000
-```
-
-Use `pydantic-settings` for config:
-```python
-from pydantic_settings import BaseSettings
-
-class Settings(BaseSettings):
-    database_url: str
-    secret_key: str
-    allowed_origins: list[str] = ["http://localhost:3000"]
-
-    class Config:
-        env_file = ".env"
-```
+- `src/momento_backend/main.py` — app factory and health routes
+- `src/momento_backend/media.py` — media router and disk storage
+- `tests/` — pytest with httpx ASGI transport
 
 ## Related
 
 - Root monorepo: `../../CLAUDE.md`
-- FastAPI docs: https://fastapi.tiangolo.com/
-- uv docs: https://docs.astral.sh/uv/
+- App upload flow: `apps/mobile/src-tauri/src/lib.rs` (`backup_to_cloud`)
