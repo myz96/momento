@@ -17,22 +17,25 @@ firmware-clean:
 firmware-reconfigure:
     cd apps/firmware && idf.py reconfigure
 
-# Backend (placeholder until scaffolded)
+# Backend
 backend-dev:
-    @echo "Backend not yet scaffolded. See apps/backend/CLAUDE.md for instructions."
+    cd apps/backend && uv run uvicorn --app-dir src momento_backend.main:app --reload
 
 backend-test:
-    @echo "Backend not yet scaffolded. See apps/backend/CLAUDE.md for instructions."
+    cd apps/backend && uv run pytest
 
 backend-lint:
-    @echo "Backend not yet scaffolded. See apps/backend/CLAUDE.md for instructions."
+    cd apps/backend && uv run ruff check .
 
-# Mobile (placeholder until scaffolded)
+# Mobile
 mobile-dev:
-    @echo "Mobile app not yet scaffolded. See apps/mobile/CLAUDE.md for instructions."
+    cd apps/mobile && pnpm tauri dev
 
 mobile-build:
-    @echo "Mobile app not yet scaffolded. See apps/mobile/CLAUDE.md for instructions."
+    cd apps/mobile && pnpm tauri build
+
+mobile-ios-dev:
+    cd apps/mobile && pnpm tauri ios dev
 
 # All apps
 lint:

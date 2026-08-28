@@ -36,28 +36,26 @@ ESP-IDF firmware for Seeed XIAO ESP32-S3 Sense board. Captures photos and video 
 **Details**: See `apps/firmware/CLAUDE.md`
 
 ### Mobile (`apps/mobile/`)
-Tauri 2.0 app for macOS and iOS. Rust backend with a web frontend. Currently a placeholder — see `apps/mobile/CLAUDE.md` for scaffold instructions.
+Tauri 2.0 app for macOS and iOS. Rust backend with a React frontend. Syncs media from the device over Wi-Fi and shows it in a gallery.
 
-**Tech**: Tauri 2.0, Rust, web frontend (React/Vue/Svelte TBD)
-**Build**: Not yet scaffolded — see `apps/mobile/CLAUDE.md`
+**Tech**: Tauri 2.0, Rust, React 19 + Vite + TypeScript
+**Build**: `just mobile-dev` or `cd apps/mobile && pnpm tauri dev`
 **Details**: See `apps/mobile/CLAUDE.md`
 
 > Tauri supports Windows, Linux, and Android, but Momento targets macOS and iOS for now.
 
 ### Backend (`apps/backend/`)
-Python FastAPI backend for cloud sync, user accounts, media processing. Not yet scaffolded.
+Python FastAPI backend for cloud sync, user accounts, media processing. Scaffolded with a health route; cloud sync is a later phase.
 
 **Tech**: Python 3.12, FastAPI, uv, pytest, ruff
-**Build**: Not yet scaffolded — see `apps/backend/CLAUDE.md` for setup instructions
+**Build**: `just backend-dev` or `cd apps/backend && uv run uvicorn --app-dir src momento_backend.main:app --reload`
 **Details**: See `apps/backend/CLAUDE.md`
 
 ## Shared Packages (`packages/`)
 For cross-app contracts:
-- Protocol definitions for firmware ↔ backend communication
-- OpenAPI/protobuf specs
-- Shared TypeScript types for mobile ↔ backend
-
-Currently empty — add files here as shared contracts emerge.
+- `device-protocol/README.md` — the device ↔ app sync contract (Wi-Fi SoftAP + HTTP API)
+- OpenAPI/protobuf specs (future)
+- Shared TypeScript types for mobile ↔ backend (future)
 
 ## Task Runner (`justfile`)
 
@@ -96,8 +94,8 @@ Each sub-app defines its own style in its CLAUDE.md. No cross-app style enforcem
 
 ## Device Communication Protocol
 
-The firmware communicates with the mobile app and (eventually) the backend. Protocol details will be documented in `packages/` when defined. Expected:
-- **Bluetooth Low Energy (BLE)**: device discovery, pairing, initial setup
-- **Wi-Fi**: bulk media sync from device → app
+The sync contract is documented in `packages/device-protocol/README.md`. Current state:
+- **Wi-Fi**: the device runs a SoftAP + HTTP file server in sync mode; the app pulls files and clears the SD card
+- **Bluetooth Low Energy (BLE)**: planned for discovery and pairing
 - **Cloud sync**: app → backend will come later
-- **Media formats**: JPEG (photos), WAV (audio). Video may be added later.
+- **Media formats**: JPEG (photos), WAV (audio), MJPEG AVI (clips)
