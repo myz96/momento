@@ -4,6 +4,7 @@ import "./App.css";
 
 type DeviceInfo = { device: string; files: number; total_bytes: number };
 type SyncProgress = { file: string; index: number; total: number };
+type WifiStatus = { state: string; ip: string; ssid: string };
 type LocalFile = {
   name: string;
   path: string;
@@ -29,11 +30,16 @@ function displayName(name: string): string {
 }
 
 function App() {
-  const [base, setBase] = useState("http://192.168.4.1");
+  const [base, setBase] = useState("http://momento.local");
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [media, setMedia] = useState<LocalFile[]>([]);
+  const [wifiSsid, setWifiSsid] = useState("");
+  const [wifiPass, setWifiPass] = useState("");
+  const [provStatus, setProvStatus] = useState("");
+  const [provError, setProvError] = useState("");
+  const [provBusy, setProvBusy] = useState(false);
 
   const refreshMedia = useCallback(async () => {
     try {
@@ -92,6 +98,27 @@ function App() {
     }
   }
 
+  async function provisionWifi() {
+    setProvBusy(true);
+    setProvError("");
+    setProvStatus("Looking for the device over Bluetooth…");
+    try {
+      const result = await invoke<WifiStatus>("provision_wifi", {
+        ssid: wifiSsid,
+        password: wifiPass,
+      });
+      setProvStatus(
+        `Device joined ${result.ssid} at ${result.ip}. Sync now works over your home network.`,
+      );
+      setBase(`http://${result.ip}`);
+    } catch (e) {
+      setProvStatus("");
+      setProvError(String(e));
+    } finally {
+      setProvBusy(false);
+    }
+  }
+
   return (
     <main className="container">
       <header>
@@ -100,11 +127,41 @@ function App() {
       </header>
 
       <section className="device-panel">
+        <h2>Device Wi-Fi setup (one time)</h2>
+        <p className="hint">
+          Hold the CAM button on the device for 1.5 s (the LED blinks), then
+          send it your home Wi-Fi over Bluetooth. After this, the device joins
+          your network and your Mac keeps its internet.
+        </p>
+        <div className="row">
+          <input
+            value={wifiSsid}
+            onChange={(e) => setWifiSsid(e.currentTarget.value)}
+            placeholder="Home Wi-Fi name"
+            disabled={provBusy}
+          />
+          <input
+            type="password"
+            value={wifiPass}
+            onChange={(e) => setWifiPass(e.currentTarget.value)}
+            placeholder="Wi-Fi password"
+            disabled={provBusy}
+          />
+          <button onClick={provisionWifi} disabled={provBusy}>
+            {provBusy ? "Sending…" : "Send over Bluetooth"}
+          </button>
+        </div>
+        {provStatus && <p className="status">{provStatus}</p>}
+        {provError && <p className="error">{provError}</p>}
+      </section>
+
+      <section className="device-panel">
         <h2>Device</h2>
         <p className="hint">
-          Hold the CAM button on the device for 1.5 s, then join the{" "}
-          <strong>Momento</strong> Wi-Fi network (password{" "}
-          <code>momento123</code>).
+          Hold the CAM button on the device for 1.5 s. Set up once above and
+          use <code>http://momento.local</code>. Without setup, join the{" "}
+          <strong>Momento</strong> network (password <code>momento123</code>)
+          and use <code>http://192.168.4.1</code>.
         </p>
         <div className="row">
           <input

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Momento uses Bluetooth to set up the capture device's Wi-Fi connection.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Momento talks to the capture device on your local network to sync photos and recordings.</string>
+</dict>
+</plist>

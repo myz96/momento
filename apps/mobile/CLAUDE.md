@@ -18,21 +18,25 @@ Wi-Fi and shows it in a gallery. See "Device Sync" below.
 
 The contract is in `packages/device-protocol/README.md`. The flow:
 
-1. The user holds the CAM button on the device for 1.5 s. The device starts
-   the `Momento` Wi-Fi access point (password `momento123`).
-2. The user joins that network and presses **Sync now** in the app.
-3. Rust command `sync_device` downloads each file from
-   `http://192.168.4.1`, verifies the byte count, stores it under
-   `$APPDATA/media/` with an epoch-ms prefix, then deletes it from the
-   device. Progress streams to the UI over a `Channel`.
+1. One-time setup: the user holds CAM for 1.5 s, then sends the home
+   Wi-Fi credentials from the app over BLE (`provision_wifi`, btleplug).
+   The device stores them and joins the home network as `momento.local`.
+2. For a sync, the user holds CAM for 1.5 s and presses **Sync now**.
+   Without setup, the device falls back to its own `Momento` network
+   (password `momento123`, base `http://192.168.4.1`).
+3. Rust command `sync_device` downloads each file, verifies the byte
+   count, stores it under `$APPDATA/media/` with an epoch-ms prefix, then
+   deletes it from the device. Progress streams to the UI over a
+   `Channel`.
 4. The gallery (`src/App.tsx`) lists local media: photos render inline,
    WAV files play in an `<audio>` element, AVI clips open in an external
    player via `open_media` (web views do not decode MJPEG AVI).
 
 Rust commands live in `src-tauri/src/lib.rs`: `device_info`, `sync_device`,
-`list_local_media`, `open_media`. The asset protocol is scoped to
-`$APPDATA/media/**` in `tauri.conf.json` so the webview can load local
-media with `convertFileSrc`.
+`list_local_media`, `open_media`, `provision_wifi`. The asset protocol is
+scoped to `$APPDATA/media/**` in `tauri.conf.json` so the webview can load
+local media with `convertFileSrc`. `src-tauri/Info.plist` carries the
+macOS/iOS Bluetooth and local-network usage descriptions.
 
 ## Core App Purpose
 
