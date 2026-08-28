@@ -229,6 +229,82 @@ struct WifiStatus {
     ssid: String,
 }
 
+#[derive(Deserialize)]
+struct CloudFile {
+    name: String,
+}
+
+#[derive(Serialize)]
+struct BackupReport {
+    uploaded: u32,
+    already_backed_up: u32,
+}
+
+/// Uploads every local media file the backend does not hold yet.
+#[tauri::command]
+async fn backup_to_cloud(
+    app: AppHandle,
+    backend: Option<String>,
+    on_progress: Channel<SyncProgress>,
+) -> Result<BackupReport, String> {
+    let backend = {
+        let b = backend.unwrap_or_default();
+        let b = b.trim();
+        if b.is_empty() {
+            "http://localhost:8000".to_string()
+        } else {
+            b.trim_end_matches('/').to_string()
+        }
+    };
+    let client = http_client()?;
+
+    let existing: Vec<CloudFile> = client
+        .get(format!("{backend}/media"))
+        .send()
+        .await
+        .map_err(|e| format!("Backend not reachable: {e}"))?
+        .error_for_status()
+        .map_err(err_str)?
+        .json()
+        .await
+        .map_err(err_str)?;
+    let existing: std::collections::HashSet<String> =
+        existing.into_iter().map(|f| f.name).collect();
+
+    let local = list_local_media(app)?;
+    let pending: Vec<&LocalFile> = local
+        .iter()
+        .filter(|f| !existing.contains(&f.name))
+        .collect();
+
+    let total = pending.len() as u32;
+    let mut uploaded = 0u32;
+    for (i, f) in pending.iter().enumerate() {
+        let _ = on_progress.send(SyncProgress {
+            file: f.name.clone(),
+            index: i as u32 + 1,
+            total,
+        });
+        let bytes = fs::read(&f.path).map_err(err_str)?;
+        let part = reqwest::multipart::Part::bytes(bytes).file_name(f.name.clone());
+        let form = reqwest::multipart::Form::new().part("file", part);
+        client
+            .post(format!("{backend}/media"))
+            .multipart(form)
+            .send()
+            .await
+            .map_err(err_str)?
+            .error_for_status()
+            .map_err(|e| format!("Upload of {} failed: {e}", f.name))?;
+        uploaded += 1;
+    }
+
+    Ok(BackupReport {
+        uploaded,
+        already_backed_up: local.len() as u32 - total,
+    })
+}
+
 async fn ble_find_device() -> Result<Peripheral, String> {
     let manager = PlatformBleManager::new().await.map_err(err_str)?;
     let adapters = manager.adapters().await.map_err(err_str)?;
@@ -361,7 +437,8 @@ pub fn run() {
             sync_device,
             list_local_media,
             open_media,
-            provision_wifi
+            provision_wifi,
+            backup_to_cloud
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

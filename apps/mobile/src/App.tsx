@@ -5,6 +5,7 @@ import "./App.css";
 type DeviceInfo = { device: string; files: number; total_bytes: number };
 type SyncProgress = { file: string; index: number; total: number };
 type WifiStatus = { state: string; ip: string; ssid: string };
+type BackupReport = { uploaded: number; already_backed_up: number };
 type LocalFile = {
   name: string;
   path: string;
@@ -40,6 +41,10 @@ function App() {
   const [provStatus, setProvStatus] = useState("");
   const [provError, setProvError] = useState("");
   const [provBusy, setProvBusy] = useState(false);
+  const [backendUrl, setBackendUrl] = useState("http://localhost:8000");
+  const [cloudStatus, setCloudStatus] = useState("");
+  const [cloudError, setCloudError] = useState("");
+  const [cloudBusy, setCloudBusy] = useState(false);
 
   const refreshMedia = useCallback(async () => {
     try {
@@ -119,6 +124,32 @@ function App() {
     }
   }
 
+  async function backupToCloud() {
+    setCloudBusy(true);
+    setCloudError("");
+    setCloudStatus("Checking what the cloud already has…");
+    const onProgress = new Channel<SyncProgress>();
+    onProgress.onmessage = (p) => {
+      setCloudStatus(`Uploading ${p.index}/${p.total} — ${displayName(p.file)}`);
+    };
+    try {
+      const report = await invoke<BackupReport>("backup_to_cloud", {
+        backend: backendUrl,
+        onProgress,
+      });
+      setCloudStatus(
+        report.uploaded === 0
+          ? `Nothing new to upload. ${report.already_backed_up} file(s) already backed up.`
+          : `Uploaded ${report.uploaded} file(s). ${report.already_backed_up} were already backed up.`,
+      );
+    } catch (e) {
+      setCloudStatus("");
+      setCloudError(String(e));
+    } finally {
+      setCloudBusy(false);
+    }
+  }
+
   return (
     <main className="container">
       <header>
@@ -179,6 +210,27 @@ function App() {
         </div>
         {status && <p className="status">{status}</p>}
         {error && <p className="error">{error}</p>}
+      </section>
+
+      <section className="device-panel">
+        <h2>Cloud backup</h2>
+        <p className="hint">
+          Uploads the library to the Momento backend. Files already in the
+          cloud are skipped.
+        </p>
+        <div className="row">
+          <input
+            value={backendUrl}
+            onChange={(e) => setBackendUrl(e.currentTarget.value)}
+            placeholder="http://localhost:8000"
+            disabled={cloudBusy}
+          />
+          <button className="primary" onClick={backupToCloud} disabled={cloudBusy}>
+            {cloudBusy ? "Uploading…" : "Back up now"}
+          </button>
+        </div>
+        {cloudStatus && <p className="status">{cloudStatus}</p>}
+        {cloudError && <p className="error">{cloudError}</p>}
       </section>
 
       <section>

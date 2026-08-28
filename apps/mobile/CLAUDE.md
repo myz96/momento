@@ -32,8 +32,12 @@ The contract is in `packages/device-protocol/README.md`. The flow:
    WAV files play in an `<audio>` element, AVI clips open in an external
    player via `open_media` (web views do not decode MJPEG AVI).
 
+Cloud backup: `backup_to_cloud` uploads the local library to the backend
+(`/media` routes, default `http://localhost:8000`) and skips files the
+backend already lists.
+
 Rust commands live in `src-tauri/src/lib.rs`: `device_info`, `sync_device`,
-`list_local_media`, `open_media`, `provision_wifi`. The asset protocol is
+`list_local_media`, `open_media`, `provision_wifi`, `backup_to_cloud`. The asset protocol is
 scoped to `$APPDATA/media/**` in `tauri.conf.json` so the webview can load
 local media with `convertFileSrc`. `src-tauri/Info.plist` carries the
 macOS/iOS Bluetooth and local-network usage descriptions.
