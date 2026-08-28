@@ -13,3 +13,11 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 
 # Long file names on the SD card (PHOTO_QVGA.JPG is longer than 8.3)
 CONFIG_FATFS_LFN_HEAP=y
+
+# App image outgrew the default 1 MB factory partition (Wi-Fi + BLE + camera)
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# BLE provisioning (NimBLE host)
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y

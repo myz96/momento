@@ -1,4 +1,4 @@
-/* Wi-Fi sync mode: SoftAP + HTTP file server over the SD card. */
+/* Wi-Fi sync mode: station-first HTTP file server over the SD card. */
 
 #include <dirent.h>
 #include <stdio.h>
@@ -8,11 +8,16 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
+#include "freertos/task.h"
 #include "esp_event.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
+#include "mdns.h"
+#include "nvs.h"
 
 #include "sd_card.h"
 #include "wifi_sync.h"
@@ -22,11 +27,61 @@ static const char *TAG = "wifi_sync";
 #define FILE_CHUNK_BYTES 16384
 #define MAX_NAME_LEN     40
 
+#define NVS_NAMESPACE "momento"
+#define NVS_KEY_SSID  "ssid"
+#define NVS_KEY_PASS  "pass"
+
+#define STA_MAX_RETRIES 4
+#define STA_JOIN_TIMEOUT_MS 20000
+
+#define WIFI_EVT_GOT_IP BIT0
+#define WIFI_EVT_FAILED BIT1
+
 static httpd_handle_t s_server;
 static esp_netif_t *s_ap_netif;
-static bool s_running;
-static bool s_netif_ready; /* esp_netif_init + default event loop run once */
+static esp_netif_t *s_sta_netif;
+static volatile wifi_sync_state_t s_state = WIFI_SYNC_OFF;
+static char s_ip[16];
+static char s_sta_ssid[33];
+static EventGroupHandle_t s_wifi_events;
+static int s_retries;
+static bool s_netif_ready; /* esp_netif_init + event loop + handlers, once */
 static bool s_wifi_ready;  /* esp_wifi_init runs once; toggles use start/stop */
+
+/* ---------- credentials in NVS ---------- */
+
+static bool creds_load(char *ssid, size_t ssid_len, char *pass,
+                       size_t pass_len)
+{
+    nvs_handle_t nvs;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs) != ESP_OK) {
+        return false;
+    }
+    esp_err_t e1 = nvs_get_str(nvs, NVS_KEY_SSID, ssid, &ssid_len);
+    esp_err_t e2 = nvs_get_str(nvs, NVS_KEY_PASS, pass, &pass_len);
+    nvs_close(nvs);
+    return e1 == ESP_OK && e2 == ESP_OK && ssid[0] != '\0';
+}
+
+static esp_err_t creds_save(const char *ssid, const char *pass)
+{
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_set_str(nvs, NVS_KEY_SSID, ssid);
+    if (err == ESP_OK) {
+        err = nvs_set_str(nvs, NVS_KEY_PASS, pass);
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(nvs);
+    }
+    nvs_close(nvs);
+    return err;
+}
+
+/* ---------- HTTP handlers ---------- */
 
 /* Only media files are listed and served. TEST.TXT and friends stay hidden. */
 static bool is_media_name(const char *name)
@@ -252,30 +307,100 @@ static esp_err_t server_start(void)
     return ESP_OK;
 }
 
-esp_err_t wifi_sync_start(void)
+/* ---------- Wi-Fi lifecycle ---------- */
+
+static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id,
+                               void *data)
 {
-    if (s_running) {
+    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
+        esp_wifi_connect();
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (s_state != WIFI_SYNC_CONNECTING) {
+            return; /* deliberate stop or mode switch */
+        }
+        if (s_retries < STA_MAX_RETRIES) {
+            s_retries++;
+            esp_wifi_connect();
+        } else {
+            xEventGroupSetBits(s_wifi_events, WIFI_EVT_FAILED);
+        }
+    } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t *evt = data;
+        snprintf(s_ip, sizeof(s_ip), IPSTR, IP2STR(&evt->ip_info.ip));
+        xEventGroupSetBits(s_wifi_events, WIFI_EVT_GOT_IP);
+    }
+}
+
+static void netif_setup_once(void)
+{
+    if (s_netif_ready) {
+        return;
+    }
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(
+        WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(
+        IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, NULL, NULL));
+    s_wifi_events = xEventGroupCreate();
+    s_netif_ready = true;
+}
+
+static esp_err_t wifi_init_once(void)
+{
+    if (s_wifi_ready) {
         return ESP_OK;
     }
-
-    if (!s_netif_ready) {
-        ESP_ERROR_CHECK(esp_netif_init());
-        ESP_ERROR_CHECK(esp_event_loop_create_default());
-        s_netif_ready = true;
+    wifi_init_config_t init_cfg = WIFI_INIT_CONFIG_DEFAULT();
+    esp_err_t err = esp_wifi_init(&init_cfg);
+    if (err == ESP_OK) {
+        s_wifi_ready = true;
     }
+    return err;
+}
+
+/* Tries to join the home network. Returns ESP_OK with an IP on success. */
+static esp_err_t sta_try_join(const char *ssid, const char *pass)
+{
+    if (!s_sta_netif) {
+        s_sta_netif = esp_netif_create_default_wifi_sta();
+    }
+
+    wifi_config_t sta_cfg = { 0 };
+    strlcpy((char *)sta_cfg.sta.ssid, ssid, sizeof(sta_cfg.sta.ssid));
+    strlcpy((char *)sta_cfg.sta.password, pass, sizeof(sta_cfg.sta.password));
+
+    s_retries = 0;
+    s_state = WIFI_SYNC_CONNECTING;
+    strlcpy(s_sta_ssid, ssid, sizeof(s_sta_ssid));
+    xEventGroupClearBits(s_wifi_events, WIFI_EVT_GOT_IP | WIFI_EVT_FAILED);
+
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
+    esp_err_t err = esp_wifi_start();
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    EventBits_t bits = xEventGroupWaitBits(
+        s_wifi_events, WIFI_EVT_GOT_IP | WIFI_EVT_FAILED, pdTRUE, pdFALSE,
+        pdMS_TO_TICKS(STA_JOIN_TIMEOUT_MS));
+
+    if (bits & WIFI_EVT_GOT_IP) {
+        ESP_LOGI(TAG, "Joined %s, ip=%s", ssid, s_ip);
+        return ESP_OK;
+    }
+    ESP_LOGW(TAG, "Join %s failed (%s)", ssid,
+             (bits & WIFI_EVT_FAILED) ? "rejected" : "timeout");
+    s_state = WIFI_SYNC_OFF;
+    esp_wifi_stop();
+    return ESP_FAIL;
+}
+
+static esp_err_t ap_start(void)
+{
     if (!s_ap_netif) {
         s_ap_netif = esp_netif_create_default_wifi_ap();
-    }
-
-    if (!s_wifi_ready) {
-        wifi_init_config_t init_cfg = WIFI_INIT_CONFIG_DEFAULT();
-        esp_err_t init_err = esp_wifi_init(&init_cfg);
-        if (init_err != ESP_OK) {
-            ESP_LOGE(TAG, "esp_wifi_init failed: %s",
-                     esp_err_to_name(init_err));
-            return init_err;
-        }
-        s_wifi_ready = true;
     }
 
     wifi_config_t ap_cfg = {
@@ -292,36 +417,136 @@ esp_err_t wifi_sync_start(void)
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg));
     esp_err_t err = esp_wifi_start();
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_wifi_start failed: %s", esp_err_to_name(err));
         return err;
+    }
+    strlcpy(s_ip, "192.168.4.1", sizeof(s_ip));
+    s_state = WIFI_SYNC_AP;
+    return ESP_OK;
+}
+
+static void mdns_start(void)
+{
+    if (mdns_init() != ESP_OK) {
+        ESP_LOGW(TAG, "mDNS init failed, momento.local not available");
+        return;
+    }
+    mdns_hostname_set("momento");
+    mdns_instance_name_set("Momento capture device");
+    mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
+}
+
+esp_err_t wifi_sync_start(void)
+{
+    if (s_state != WIFI_SYNC_OFF) {
+        return ESP_OK;
+    }
+
+    netif_setup_once();
+    esp_err_t err = wifi_init_once();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_wifi_init failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    char ssid[33] = { 0 };
+    char pass[65] = { 0 };
+    bool joined = false;
+    if (creds_load(ssid, sizeof(ssid), pass, sizeof(pass))) {
+        ESP_LOGI(TAG, "Trying home network %s", ssid);
+        joined = sta_try_join(ssid, pass) == ESP_OK;
+    } else {
+        ESP_LOGI(TAG, "No stored credentials, using SoftAP");
+    }
+
+    if (joined) {
+        s_state = WIFI_SYNC_STA;
+    } else {
+        err = ap_start();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "SoftAP start failed: %s", esp_err_to_name(err));
+            s_state = WIFI_SYNC_OFF;
+            return err;
+        }
     }
 
     err = server_start();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_start failed: %s", esp_err_to_name(err));
         esp_wifi_stop();
+        s_state = WIFI_SYNC_OFF;
         return err;
     }
+    mdns_start();
 
-    s_running = true;
-    ESP_LOGI(TAG, "Sync mode on. SSID=%s pass=%s url=http://192.168.4.1",
-             WIFI_SYNC_SSID, WIFI_SYNC_PASSWORD);
+    if (s_state == WIFI_SYNC_STA) {
+        ESP_LOGI(TAG, "Sync mode on (station): http://%s and momento.local",
+                 s_ip);
+    } else {
+        ESP_LOGI(TAG, "Sync mode on (SoftAP): SSID=%s pass=%s url=http://%s",
+                 WIFI_SYNC_SSID, WIFI_SYNC_PASSWORD, s_ip);
+    }
     return ESP_OK;
 }
 
 void wifi_sync_stop(void)
 {
-    if (!s_running) {
+    if (s_state == WIFI_SYNC_OFF) {
         return;
     }
-    httpd_stop(s_server);
-    s_server = NULL;
+    s_state = WIFI_SYNC_OFF;
+    mdns_free();
+    if (s_server) {
+        httpd_stop(s_server);
+        s_server = NULL;
+    }
     esp_wifi_stop();
-    s_running = false;
     ESP_LOGI(TAG, "Sync mode off");
 }
 
 bool wifi_sync_is_running(void)
 {
-    return s_running;
+    return s_state != WIFI_SYNC_OFF;
+}
+
+wifi_sync_state_t wifi_sync_state(void)
+{
+    return s_state;
+}
+
+void wifi_sync_status_json(char *buf, size_t buf_len)
+{
+    const char *state;
+    switch (s_state) {
+    case WIFI_SYNC_STA:        state = "sta"; break;
+    case WIFI_SYNC_AP:         state = "ap"; break;
+    case WIFI_SYNC_CONNECTING: state = "connecting"; break;
+    default:                   state = "off"; break;
+    }
+    snprintf(buf, buf_len, "{\"state\":\"%s\",\"ip\":\"%s\",\"ssid\":\"%s\"}",
+             state, s_state == WIFI_SYNC_OFF ? "" : s_ip,
+             s_state == WIFI_SYNC_STA ? s_sta_ssid : "");
+}
+
+static void reconnect_task(void *arg)
+{
+    wifi_sync_stop();
+    wifi_sync_start();
+    vTaskDelete(NULL);
+}
+
+esp_err_t wifi_sync_apply_credentials(const char *ssid, const char *password)
+{
+    esp_err_t err = creds_save(ssid, password);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Credential save failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    ESP_LOGI(TAG, "Credentials stored for %s", ssid);
+
+    if (s_state != WIFI_SYNC_OFF) {
+        /* Restart from a task: the BLE callback must not block for the
+         * 20 s join timeout. */
+        xTaskCreate(reconnect_task, "wifi_recfg", 4096, NULL, 5, NULL);
+    }
+    return ESP_OK;
 }

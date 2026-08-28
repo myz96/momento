@@ -4,6 +4,7 @@ idf_component_register(SRCS "momento_main.c"
                             "avi_writer.c"
                             "wav_writer.c"
                             "wifi_sync.c"
+                            "ble_prov.c"
                        PRIV_REQUIRES esp_driver_gpio
                                      esp_driver_i2c
                                      fatfs
@@ -17,4 +18,5 @@ idf_component_register(SRCS "momento_main.c"
                                      esp_event
                                      esp_http_server
                                      nvs_flash
+                                     bt
                        INCLUDE_DIRS ".")

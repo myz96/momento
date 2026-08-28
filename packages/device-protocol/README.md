@@ -6,15 +6,42 @@ The app implements the client side (`apps/mobile/src-tauri/src/lib.rs`).
 
 ## Transport
 
-The device runs a Wi-Fi access point and an HTTP server in "sync mode".
+Hold the CAM button for 1.5 s to toggle sync mode (the status LED blinks).
+In sync mode the device runs an HTTP server and picks a network in this
+order:
 
-| Item | Value |
+1. **Station mode** — the device joins the home network with credentials
+   stored in NVS (see "BLE provisioning" below). It announces itself as
+   `momento.local` via mDNS. Base URL: `http://momento.local` or
+   `http://<device-ip>`.
+2. **SoftAP fallback** — no stored credentials, or the join fails. The
+   device creates its own network.
+
+| SoftAP item | Value |
 |------|-------|
-| Trigger | Hold the CAM button for 1.5 s (hold again to exit) |
 | SSID | `Momento` |
 | Password | `momento123` |
 | Base URL | `http://192.168.4.1` |
-| Indicator | The status LED blinks while sync mode is on |
+
+## BLE provisioning
+
+While sync mode is on, the device also advertises over BLE as `Momento`.
+The app writes the home Wi-Fi credentials once; the device stores them in
+NVS and reconnects in station mode.
+
+GATT service `6D6F6D65-6E74-6F00-0000-000000000001`:
+
+| Characteristic | UUID suffix | Access | Content |
+|----------------|-------------|--------|---------|
+| ssid | `…0002` | write | UTF-8 network name, 1–32 bytes |
+| password | `…0003` | write | UTF-8 password, 0–64 bytes |
+| control | `…0004` | write | `0x01` = save credentials and reconnect |
+| status | `…0005` | read | JSON `{"state":"sta","ip":"192.168.1.7","ssid":"Home"}` |
+
+`state` values: `sta` (on the home network), `ap` (fallback SoftAP),
+`connecting`, `off`. Provisioning flow: write ssid → write password →
+write control `0x01` → poll status every 2 s. `sta` means success; `ap`
+means the join failed and the credentials are wrong.
 
 ## Endpoints
 
@@ -73,7 +100,7 @@ not exist, `500` when the delete fails.
 A per-file delete keeps the data safe: a lost connection mid-sync never
 removes a file the app does not hold.
 
-## Future (phase 2)
+## Future
 
-- BLE for discovery and pairing, so the app can switch Wi-Fi automatically.
+- BLE command to enter sync mode remotely, without the button hold.
 - App → backend upload for cloud storage and AI analysis.

@@ -39,14 +39,21 @@ The haptic feedback is intentionally different between buttons so the user knows
 
 ## Wi-Fi Sync Mode
 
-Hold the shutter button for 1.5 s to toggle sync mode. The device starts a
-SoftAP (SSID `Momento`, password `momento123`) and an HTTP file server at
-`http://192.168.4.1`. The status LED blinks while sync mode is on. The
-companion app downloads each file, verifies the size, and then deletes it
-from the SD card.
+Hold the shutter button for 1.5 s to toggle sync mode. The status LED
+blinks while sync mode is on. The device serves the HTTP file API and
+picks a network in this order:
 
-The HTTP API contract lives in `packages/device-protocol/README.md`.
-Implementation: `main/wifi_sync.c`.
+1. Station mode: joins the home network with NVS credentials, reachable
+   as `momento.local` (mDNS).
+2. SoftAP fallback: SSID `Momento`, password `momento123`, at
+   `http://192.168.4.1`.
+
+In sync mode the device also advertises over BLE as `Momento`
+(`main/ble_prov.c`, NimBLE). The app sends the home Wi-Fi credentials
+over BLE once; the device stores them in NVS and reconnects.
+
+The full contract lives in `packages/device-protocol/README.md`.
+Implementation: `main/wifi_sync.c` and `main/ble_prov.c`.
 
 ## Build & Flash
 
@@ -81,7 +88,8 @@ apps/firmware/
 │   ├── mic.c/h           # I2S PDM microphone driver
 │   ├── avi_writer.c/h    # MJPEG AVI file writer
 │   ├── wav_writer.c/h    # WAV audio file writer
-│   └── wifi_sync.c/h     # Sync mode: SoftAP + HTTP file server
+│   ├── wifi_sync.c/h     # Sync mode: station/SoftAP Wi-Fi + HTTP file server
+│   └── ble_prov.c/h      # BLE Wi-Fi credential provisioning (NimBLE)
 ├── .devcontainer/       # Docker devcontainer for ESP-IDF
 └── .vscode/             # VSCode settings for ESP-IDF extension
 ```

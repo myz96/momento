@@ -30,6 +30,7 @@
 #include "nvs_flash.h"
 
 #include "avi_writer.h"
+#include "ble_prov.h"
 #include "mic.h"
 #include "sd_card.h"
 #include "wav_writer.h"
@@ -381,7 +382,9 @@ static bool cam_hold_is_long(void)
 /* Runs sync mode until CAM is held again. The LED blinks the whole time. */
 static void sync_mode(void)
 {
+    ble_prov_start(); /* provisioning stays available even when Wi-Fi fails */
     if (wifi_sync_start() != ESP_OK) {
+        ble_prov_stop();
         for (int i = 0; i < 5; i++) { /* fast error blink */
             gpio_set_level(PIN_LED, 1);
             vTaskDelay(pdMS_TO_TICKS(60));
@@ -405,6 +408,7 @@ static void sync_mode(void)
         vTaskDelay(pdMS_TO_TICKS(250));
     }
 
+    ble_prov_stop();
     wifi_sync_stop();
     gpio_set_level(PIN_LED, 0);
 }
