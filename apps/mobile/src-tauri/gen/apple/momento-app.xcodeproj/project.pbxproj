@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		08BD6849CB04BDE384EA4890 /* CoreGraphics.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8468D2F92022F91854C63DE6 /* CoreGraphics.framework */; };
+		08BD6849CB04BDE384EA4891 /* CoreBluetooth.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8468D2F92022F91854C63DE7 /* CoreBluetooth.framework */; };
 		23E22BDA894E0E1122E4291D /* assets in Resources */ = {isa = PBXBuildFile; fileRef = 50AD488A5F4491F733648455 /* assets */; };
 		281E9E3356AB44199BD7706D /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 4B0EABCF9D3B486428205D53 /* LaunchScreen.storyboard */; };
 		337E78E9ED23D4780104A195 /* MetalKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D4C6CE059F8C83640A35ECEE /* MetalKit.framework */; };
@@ -31,6 +32,7 @@
 		50AD488A5F4491F733648455 /* assets */ = {isa = PBXFileReference; lastKnownFileType = folder; path = assets; sourceTree = SOURCE_ROOT; };
 		58ECC80AA3895B1AB94C065B /* bindings.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = bindings.h; sourceTree = "<group>"; };
 		8468D2F92022F91854C63DE6 /* CoreGraphics.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreGraphics.framework; path = System/Library/Frameworks/CoreGraphics.framework; sourceTree = SDKROOT; };
+		8468D2F92022F91854C63DE7 /* CoreBluetooth.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreBluetooth.framework; path = System/Library/Frameworks/CoreBluetooth.framework; sourceTree = SDKROOT; };
 		8D175C8D3FBFE8D0B039FFCA /* libapp.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libapp.a; sourceTree = "<group>"; };
 		8DCC963E0F110DA34048BD23 /* lib.rs */ = {isa = PBXFileReference; path = lib.rs; sourceTree = "<group>"; };
 		9F6166B105F418CEACA37180 /* main.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = main.mm; sourceTree = "<group>"; };
@@ -49,6 +51,7 @@
 			files = (
 				C056EFCD6504601937CB7D81 /* libapp.a in Frameworks */,
 				08BD6849CB04BDE384EA4890 /* CoreGraphics.framework in Frameworks */,
+				08BD6849CB04BDE384EA4891 /* CoreBluetooth.framework in Frameworks */,
 				8BB1C43B1A85CEE4B18113D3 /* Metal.framework in Frameworks */,
 				337E78E9ED23D4780104A195 /* MetalKit.framework in Frameworks */,
 				3526B586A422A0D28299F289 /* QuartzCore.framework in Frameworks */,
@@ -65,6 +68,7 @@
 			isa = PBXGroup;
 			children = (
 				8468D2F92022F91854C63DE6 /* CoreGraphics.framework */,
+				8468D2F92022F91854C63DE7 /* CoreBluetooth.framework */,
 				8D175C8D3FBFE8D0B039FFCA /* libapp.a */,
 				B3969203B4211D314D96B0D5 /* Metal.framework */,
 				D4C6CE059F8C83640A35ECEE /* MetalKit.framework */,
@@ -275,7 +279,7 @@
 				);
 				"LIBRARY_SEARCH_PATHS[arch=arm64]" = "$(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
 				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = "$(inherited) $(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
-				PRODUCT_BUNDLE_IDENTIFIER = "com.momento.momento-app";
+				PRODUCT_BUNDLE_IDENTIFIER = com.momento.momento-app;
 				PRODUCT_NAME = "momento-app";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -306,7 +310,7 @@
 				);
 				"LIBRARY_SEARCH_PATHS[arch=arm64]" = "$(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
 				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = "$(inherited) $(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
-				PRODUCT_BUNDLE_IDENTIFIER = "com.momento.momento-app";
+				PRODUCT_BUNDLE_IDENTIFIER = com.momento.momento-app;
 				PRODUCT_NAME = "momento-app";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
