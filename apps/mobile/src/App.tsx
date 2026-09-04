@@ -5,13 +5,20 @@ import "./App.css";
 type DeviceInfo = { device: string; files: number; total_bytes: number };
 type SyncProgress = { file: string; index: number; total: number };
 type WifiStatus = { state: string; ip: string; ssid: string };
-type BackupReport = { uploaded: number; already_backed_up: number };
+type BackupReport = {
+  uploaded: number;
+  already_backed_up: number;
+  freed: number;
+  freed_bytes: number;
+};
 type LocalFile = {
   name: string;
   path: string;
   size: number;
   kind: string;
   modified_ms: number;
+  location: "local" | "cloud";
+  thumb: string | null;
 };
 
 function formatBytes(n: number): string {
@@ -23,6 +30,36 @@ function formatBytes(n: number): string {
 function formatDate(ms: number): string {
   if (!ms) return "";
   return new Date(ms).toLocaleString();
+}
+
+function dayLabel(ms: number): string {
+  if (!ms) return "Undated";
+  const d = new Date(ms);
+  const today = new Date();
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  if (d.toDateString() === today.toDateString()) return "Today";
+  if (d.toDateString() === yesterday.toDateString()) return "Yesterday";
+  return d.toLocaleDateString(undefined, {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    year: d.getFullYear() === today.getFullYear() ? undefined : "numeric",
+  });
+}
+
+function groupByDay(files: LocalFile[]): [string, LocalFile[]][] {
+  const groups: [string, LocalFile[]][] = [];
+  for (const f of files) {
+    const label = dayLabel(f.modified_ms);
+    const last = groups[groups.length - 1];
+    if (last && last[0] === label) {
+      last[1].push(f);
+    } else {
+      groups.push([label, [f]]);
+    }
+  }
+  return groups;
 }
 
 function displayName(name: string): string {
@@ -45,6 +82,7 @@ function App() {
   const [cloudStatus, setCloudStatus] = useState("");
   const [cloudError, setCloudError] = useState("");
   const [cloudBusy, setCloudBusy] = useState(false);
+  const [freeSpace, setFreeSpace] = useState(true);
 
   const refreshMedia = useCallback(async () => {
     try {
@@ -135,13 +173,21 @@ function App() {
     try {
       const report = await invoke<BackupReport>("backup_to_cloud", {
         backend: backendUrl,
+        freeSpace,
         onProgress,
       });
-      setCloudStatus(
+      const parts = [
         report.uploaded === 0
-          ? `Nothing new to upload. ${report.already_backed_up} file(s) already backed up.`
-          : `Uploaded ${report.uploaded} file(s). ${report.already_backed_up} were already backed up.`,
-      );
+          ? "Nothing new to upload."
+          : `Uploaded ${report.uploaded} file(s).`,
+      ];
+      if (report.freed > 0) {
+        parts.push(
+          `Freed ${formatBytes(report.freed_bytes)} on this device (${report.freed} file(s) now stream from the cloud).`,
+        );
+      }
+      setCloudStatus(parts.join(" "));
+      await refreshMedia();
     } catch (e) {
       setCloudStatus("");
       setCloudError(String(e));
@@ -229,6 +275,15 @@ function App() {
             {cloudBusy ? "Uploading…" : "Back up now"}
           </button>
         </div>
+        <label className="checkline">
+          <input
+            type="checkbox"
+            checked={freeSpace}
+            onChange={(e) => setFreeSpace(e.currentTarget.checked)}
+            disabled={cloudBusy}
+          />
+          Free up space after backup (keep thumbnails, stream originals)
+        </label>
         {cloudStatus && <p className="status">{cloudStatus}</p>}
         {cloudError && <p className="error">{cloudError}</p>}
       </section>
@@ -241,35 +296,60 @@ function App() {
         {media.length === 0 ? (
           <p className="hint">No media yet. Sync the device to fill this list.</p>
         ) : (
-          <div className="gallery">
-            {media.map((m) => (
-              <div className="card" key={m.path}>
-                {m.kind === "photo" && (
-                  <img src={convertFileSrc(m.path)} alt={displayName(m.name)} />
-                )}
-                {m.kind === "audio" && (
-                  <div className="audio-box">
-                    <span className="badge">Voice</span>
-                    <audio controls src={convertFileSrc(m.path)} />
-                  </div>
-                )}
-                {m.kind === "video" && (
-                  <div className="video-box">
-                    <span className="badge">Clip</span>
-                    <button onClick={() => invoke("open_media", { path: m.path })}>
-                      Open in player
-                    </button>
-                  </div>
-                )}
-                <div className="meta">
-                  <span className="name">{displayName(m.name)}</span>
-                  <span className="sub">
-                    {formatBytes(m.size)} · {formatDate(m.modified_ms)}
-                  </span>
-                </div>
+          groupByDay(media).map(([label, files]) => (
+            <div key={label}>
+              <h3 className="day-head">{label}</h3>
+              <div className="gallery">
+                {files.map((m) => {
+                  const inCloud = m.location === "cloud";
+                  const src = inCloud
+                    ? `${backendUrl}/media/${m.name}`
+                    : convertFileSrc(m.path);
+                  const thumbSrc = inCloud && m.thumb ? convertFileSrc(m.thumb) : src;
+                  return (
+                    <div className="card" key={m.name}>
+                      {m.kind === "photo" && (
+                        <img src={thumbSrc} alt={displayName(m.name)} />
+                      )}
+                      {m.kind === "audio" && (
+                        <div className="audio-box">
+                          <span className="badge">Voice</span>
+                          <audio controls src={src} />
+                        </div>
+                      )}
+                      {m.kind === "video" && (
+                        <div className="video-box">
+                          {inCloud && m.thumb ? (
+                            <img src={thumbSrc} alt={displayName(m.name)} />
+                          ) : (
+                            <span className="badge">Clip</span>
+                          )}
+                          <button
+                            onClick={() =>
+                              invoke("open_media", {
+                                path: inCloud ? src : m.path,
+                              })
+                            }
+                          >
+                            Open in player
+                          </button>
+                        </div>
+                      )}
+                      <div className="meta">
+                        <span className="name">
+                          {displayName(m.name)}
+                          {inCloud && <span className="cloud-badge">☁︎</span>}
+                        </span>
+                        <span className="sub">
+                          {formatBytes(m.size)} · {formatDate(m.modified_ms)}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
-            ))}
-          </div>
+            </div>
+          ))
         )}
       </section>
     </main>

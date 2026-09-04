@@ -1,6 +1,10 @@
+mod offload;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use offload::OffloadedFile;
 
 use btleplug::api::{
     Central, Manager as BleManager, Peripheral as _, ScanFilter, WriteType,
@@ -46,6 +50,9 @@ struct LocalFile {
     size: u64,
     kind: String,
     modified_ms: u64,
+    /// "local" = full file on disk, "cloud" = offloaded, thumbnail only.
+    location: String,
+    thumb: Option<String>,
 }
 
 fn err_str<E: std::fmt::Display>(e: E) -> String {
@@ -69,8 +76,14 @@ fn base_url(base: Option<String>) -> String {
     }
 }
 
+fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app.path().app_data_dir().map_err(err_str)?;
+    fs::create_dir_all(&dir).map_err(err_str)?;
+    Ok(dir)
+}
+
 fn media_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app.path().app_data_dir().map_err(err_str)?.join("media");
+    let dir = data_dir(app)?.join("media");
     fs::create_dir_all(&dir).map_err(err_str)?;
     Ok(dir)
 }
@@ -107,6 +120,8 @@ fn local_file_meta(path: &Path) -> Result<LocalFile, String> {
         path: path.to_string_lossy().to_string(),
         size: meta.len(),
         modified_ms,
+        location: "local".to_string(),
+        thumb: None,
     })
 }
 
@@ -213,13 +228,28 @@ fn list_local_media(app: AppHandle) -> Result<Vec<LocalFile>, String> {
             out.push(local_file_meta(&path)?);
         }
     }
+    for f in offload::load_index(&data_dir(&app)?) {
+        out.push(LocalFile {
+            name: f.name,
+            path: String::new(),
+            size: f.size,
+            kind: f.kind,
+            modified_ms: f.modified_ms,
+            location: "cloud".to_string(),
+            thumb: f.thumb,
+        });
+    }
     out.sort_by(|a, b| b.modified_ms.cmp(&a.modified_ms));
     Ok(out)
 }
 
 #[tauri::command]
 fn open_media(path: String) -> Result<(), String> {
-    tauri_plugin_opener::open_path(path, None::<String>).map_err(err_str)
+    if path.starts_with("http://") || path.starts_with("https://") {
+        tauri_plugin_opener::open_url(path, None::<String>).map_err(err_str)
+    } else {
+        tauri_plugin_opener::open_path(path, None::<String>).map_err(err_str)
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -232,19 +262,24 @@ struct WifiStatus {
 #[derive(Deserialize)]
 struct CloudFile {
     name: String,
+    size: u64,
 }
 
 #[derive(Serialize)]
 struct BackupReport {
     uploaded: u32,
     already_backed_up: u32,
+    freed: u32,
+    freed_bytes: u64,
 }
 
-/// Uploads every local media file the backend does not hold yet.
+/// Uploads every local media file the backend does not hold yet. With
+/// free_space, a verified upload is then replaced locally by a thumbnail.
 #[tauri::command]
 async fn backup_to_cloud(
     app: AppHandle,
     backend: Option<String>,
+    free_space: bool,
     on_progress: Channel<SyncProgress>,
 ) -> Result<BackupReport, String> {
     let backend = {
@@ -268,13 +303,15 @@ async fn backup_to_cloud(
         .json()
         .await
         .map_err(err_str)?;
-    let existing: std::collections::HashSet<String> =
-        existing.into_iter().map(|f| f.name).collect();
+    let cloud_sizes: std::collections::HashMap<String, u64> =
+        existing.into_iter().map(|f| (f.name, f.size)).collect();
 
-    let local = list_local_media(app)?;
-    let pending: Vec<&LocalFile> = local
+    let local = list_local_media(app.clone())?;
+    let local: Vec<&LocalFile> =
+        local.iter().filter(|f| f.location == "local").collect();
+    let pending: Vec<&&LocalFile> = local
         .iter()
-        .filter(|f| !existing.contains(&f.name))
+        .filter(|f| !cloud_sizes.contains_key(&f.name))
         .collect();
 
     let total = pending.len() as u32;
@@ -299,9 +336,55 @@ async fn backup_to_cloud(
         uploaded += 1;
     }
 
+    let mut freed = 0u32;
+    let mut freed_bytes = 0u64;
+    if free_space {
+        // Re-read the cloud list so every local file is verified against
+        // the byte count the backend actually stored.
+        let verified: Vec<CloudFile> = client
+            .get(format!("{backend}/media"))
+            .send()
+            .await
+            .map_err(err_str)?
+            .error_for_status()
+            .map_err(err_str)?
+            .json()
+            .await
+            .map_err(err_str)?;
+        let verified: std::collections::HashMap<String, u64> =
+            verified.into_iter().map(|f| (f.name, f.size)).collect();
+
+        let root = data_dir(&app)?;
+        let thumbs = offload::thumbs_dir(&root)?;
+        let mut index = offload::load_index(&root);
+        for f in &local {
+            if verified.get(&f.name) != Some(&f.size) {
+                continue; // not in the cloud, or the size differs: keep it
+            }
+            let src = PathBuf::from(&f.path);
+            let thumb = match offload::make_thumbnail(&src, &f.kind, &thumbs) {
+                Ok(t) => t,
+                Err(_) => continue, // keep the full file when no thumbnail
+            };
+            index.push(OffloadedFile {
+                name: f.name.clone(),
+                size: f.size,
+                kind: f.kind.clone(),
+                modified_ms: f.modified_ms,
+                thumb: thumb.map(|p| p.to_string_lossy().to_string()),
+            });
+            fs::remove_file(&src).map_err(err_str)?;
+            freed += 1;
+            freed_bytes += f.size;
+        }
+        offload::save_index(&root, &index)?;
+    }
+
     Ok(BackupReport {
         uploaded,
         already_backed_up: local.len() as u32 - total,
+        freed,
+        freed_bytes,
     })
 }
 

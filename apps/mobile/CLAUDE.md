@@ -34,7 +34,13 @@ The contract is in `packages/device-protocol/README.md`. The flow:
 
 Cloud backup: `backup_to_cloud` uploads the local library to the backend
 (`/media` routes, default `http://localhost:8000`) and skips files the
-backend already lists.
+backend already lists. With `free_space` (UI checkbox, default on), each
+size-verified upload is then offloaded: `src-tauri/src/offload.rs` writes
+a thumbnail (photos directly; clips via the first MJPEG frame in the AVI),
+records the entry in `$APPDATA/offloaded.json`, and deletes the full local
+file. The gallery lists these as `location: "cloud"` — thumbnails render
+locally, full files stream from the backend. A thumbnail failure keeps the
+full file local; a file is never deleted before its cloud copy is verified.
 
 Rust commands live in `src-tauri/src/lib.rs`: `device_info`, `sync_device`,
 `list_local_media`, `open_media`, `provision_wifi`, `backup_to_cloud`. The asset protocol is
