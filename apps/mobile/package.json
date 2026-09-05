@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "dev:mock": "VITE_MOCK=1 vite"
   },
   "dependencies": {
     "react": "^19.1.0",

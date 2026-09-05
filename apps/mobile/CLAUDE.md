@@ -63,6 +63,19 @@ Responsibilities:
 - **AI assistance** (future): ask natural-language questions about your day, get summaries, find patterns
 - **Cloud relay**: upload to the backend for long-term storage and deeper analysis (future)
 
+## Design
+
+The UI follows the "ember on stone" system: warm stone neutrals, one
+amber accent, green/red only for meaning — every color and face is a
+token at the top of `src/App.css`. Structure: a 52px bar (brand, Device
+and Cloud status pills, Sync, settings gear), the day-grouped media
+gallery as the whole page, and all configuration in a settings sheet.
+
+Design iteration runs in a plain browser: `pnpm dev:mock` fakes the
+Tauri IPC layer (`src/mock.ts`) with sample data. Thumbnails for the
+harness live in `public/mock/*.jpg` (gitignored — drop any 4:3 JPEGs
+in; tiles render grey without them).
+
 ## Development Commands
 
 After scaffolding:

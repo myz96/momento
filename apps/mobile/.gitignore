@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Design-harness sample media (personal thumbnails stay local)
+public/mock/*.jpg
