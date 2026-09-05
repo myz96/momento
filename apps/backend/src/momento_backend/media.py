@@ -6,7 +6,7 @@ disk by default, Cloudflare R2 when the MOMENTO_R2_* variables are set.
 
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
@@ -60,13 +60,58 @@ async def list_media() -> list[dict[str, int | str]]:
     return [{"name": e.name, "size": e.size} for e in entries]
 
 
+def parse_range(header: str, size: int) -> tuple[int, int] | None:
+    """Parses a single-range 'bytes=' header; None means serve the whole
+    file. WebKit media players require 206 responses to play audio/video."""
+    if not header.startswith("bytes="):
+        return None
+    spec = header[6:].split(",")[0].strip()
+    start_s, _, end_s = spec.partition("-")
+    try:
+        if start_s == "":
+            suffix = int(end_s)
+            if suffix <= 0:
+                raise HTTPException(status_code=416, detail="Bad range")
+            return max(0, size - suffix), size - 1
+        start = int(start_s)
+        end = int(end_s) if end_s else size - 1
+    except ValueError:
+        return None
+    end = min(end, size - 1)
+    if start > end or start >= size:
+        raise HTTPException(status_code=416, detail="Range out of bounds")
+    return start, end
+
+
 @router.get("/{name}")
-async def download_media(name: str) -> StreamingResponse:
+async def download_media(name: str, request: Request) -> StreamingResponse:
     name = safe_name(name)
     storage = get_storage()
-    if not await run_in_threadpool(storage.exists, name):
+    size = await run_in_threadpool(storage.size, name)
+    if size is None:
         raise HTTPException(status_code=404, detail=f"No such file: {name}")
     media_type = CONTENT_TYPES.get(
         Path(name).suffix.lower(), "application/octet-stream"
     )
-    return StreamingResponse(storage.stream(name), media_type=media_type)
+
+    span = None
+    range_header = request.headers.get("range")
+    if range_header and size > 0:
+        span = parse_range(range_header, size)
+    if span is not None:
+        start, end = span
+        return StreamingResponse(
+            storage.stream(name, start, end),
+            status_code=206,
+            media_type=media_type,
+            headers={
+                "Content-Range": f"bytes {start}-{end}/{size}",
+                "Content-Length": str(end - start + 1),
+                "Accept-Ranges": "bytes",
+            },
+        )
+    return StreamingResponse(
+        storage.stream(name),
+        media_type=media_type,
+        headers={"Content-Length": str(size), "Accept-Ranges": "bytes"},
+    )

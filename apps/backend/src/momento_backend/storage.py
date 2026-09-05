@@ -27,9 +27,9 @@ class MediaStorage(Protocol):
 
     def list(self) -> list[StoredFile]: ...
 
-    def exists(self, name: str) -> bool: ...
+    def size(self, name: str) -> int | None: ...
 
-    def stream(self, name: str) -> Iterator[bytes]: ...
+    def stream(self, name: str, start: int = 0, end: int | None = None) -> Iterator[bytes]: ...
 
 
 class DiskStorage:
@@ -67,12 +67,25 @@ class DiskStorage:
         entries.sort(key=lambda e: e.name)
         return entries
 
-    def exists(self, name: str) -> bool:
-        return (self._dir() / name).is_file()
+    def size(self, name: str) -> int | None:
+        target = self._dir() / name
+        return target.stat().st_size if target.is_file() else None
 
-    def stream(self, name: str) -> Iterator[bytes]:
+    def stream(
+        self, name: str, start: int = 0, end: int | None = None
+    ) -> Iterator[bytes]:
         with (self._dir() / name).open("rb") as f:
-            while chunk := f.read(CHUNK_BYTES):
+            f.seek(start)
+            remaining = None if end is None else end - start + 1
+            while True:
+                want = CHUNK_BYTES if remaining is None else min(CHUNK_BYTES, remaining)
+                if want <= 0:
+                    return
+                chunk = f.read(want)
+                if not chunk:
+                    return
+                if remaining is not None:
+                    remaining -= len(chunk)
                 yield chunk
 
 
@@ -109,15 +122,20 @@ class R2Storage:
         entries.sort(key=lambda e: e.name)
         return entries
 
-    def exists(self, name: str) -> bool:
+    def size(self, name: str) -> int | None:
         try:
-            self.client.head_object(Bucket=self.bucket, Key=name)
-            return True
+            head = self.client.head_object(Bucket=self.bucket, Key=name)
+            return head["ContentLength"]
         except self.client.exceptions.ClientError:
-            return False
+            return None
 
-    def stream(self, name: str) -> Iterator[bytes]:
-        body = self.client.get_object(Bucket=self.bucket, Key=name)["Body"]
+    def stream(
+        self, name: str, start: int = 0, end: int | None = None
+    ) -> Iterator[bytes]:
+        kwargs = {"Bucket": self.bucket, "Key": name}
+        if start or end is not None:
+            kwargs["Range"] = f"bytes={start}-{'' if end is None else end}"
+        body = self.client.get_object(**kwargs)["Body"]
         while chunk := body.read(CHUNK_BYTES):
             yield chunk
 
