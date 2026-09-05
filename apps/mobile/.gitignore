@@ -25,3 +25,5 @@ dist-ssr
 
 # Design-harness sample media (personal thumbnails stay local)
 public/mock/*.jpg
+public/mock/*.avi
+public/mock/*.wav
