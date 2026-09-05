@@ -47,9 +47,10 @@ the radio in AP+station mode — both live at the same time:
    join lands; then also `momento.local` (mDNS), and SNTP sets the clock
    so file timestamps become real capture times.
 
-In sync mode the device also advertises over BLE as `Momento`
-(`main/ble_prov.c`, NimBLE). The app sends the home Wi-Fi credentials
-over BLE once; the device stores them in NVS and reconnects.
+The device advertises over BLE as `Momento` from boot
+(`main/ble_prov.c`, NimBLE). Besides one-time Wi-Fi provisioning, the
+app can enter/leave sync mode remotely (control opcodes 0x02/0x03), so
+syncs need no button holds.
 
 The full contract lives in `packages/device-protocol/README.md`.
 Implementation: `main/wifi_sync.c` and `main/ble_prov.c`.

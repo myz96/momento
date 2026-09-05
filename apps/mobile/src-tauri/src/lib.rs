@@ -23,6 +23,48 @@ const BLE_DEVICE_NAME: &str = "Momento";
 /// it, and then delete the completed original.
 static STORE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// Holds an iOS background-task assertion for as long as it lives, so a
+/// sync or backup survives the user switching apps mid-transfer. On
+/// other platforms it is a no-op.
+struct BackgroundGuard {
+    #[cfg(target_os = "ios")]
+    task_id: usize,
+}
+
+#[cfg(target_os = "ios")]
+const UI_BACKGROUND_TASK_INVALID: usize = usize::MAX;
+
+fn hold_background() -> BackgroundGuard {
+    #[cfg(target_os = "ios")]
+    {
+        use objc2::runtime::AnyObject;
+        use objc2::{class, msg_send};
+        let task_id = unsafe {
+            let app: *mut AnyObject =
+                msg_send![class!(UIApplication), sharedApplication];
+            msg_send![app, beginBackgroundTaskWithExpirationHandler: core::ptr::null_mut::<AnyObject>()]
+        };
+        BackgroundGuard { task_id }
+    }
+    #[cfg(not(target_os = "ios"))]
+    BackgroundGuard {}
+}
+
+#[cfg(target_os = "ios")]
+impl Drop for BackgroundGuard {
+    fn drop(&mut self) {
+        if self.task_id != UI_BACKGROUND_TASK_INVALID {
+            use objc2::runtime::AnyObject;
+            use objc2::{class, msg_send};
+            unsafe {
+                let app: *mut AnyObject =
+                    msg_send![class!(UIApplication), sharedApplication];
+                let _: () = msg_send![app, endBackgroundTask: self.task_id];
+            }
+        }
+    }
+}
+
 const CHR_SSID: Uuid = Uuid::from_u128(0x6d6f6d65_6e74_6f00_0000_000000000002);
 const CHR_PASS: Uuid = Uuid::from_u128(0x6d6f6d65_6e74_6f00_0000_000000000003);
 const CHR_CONTROL: Uuid = Uuid::from_u128(0x6d6f6d65_6e74_6f00_0000_000000000004);
@@ -161,6 +203,7 @@ async fn sync_device(
     on_progress: Channel<SyncProgress>,
 ) -> Result<Vec<LocalFile>, String> {
     let _guard = STORE_LOCK.lock().await;
+    let _bg = hold_background();
     let base = base_url(base);
     let client = http_client()?;
 
@@ -338,6 +381,7 @@ async fn backup_to_cloud(
     api_key: Option<String>,
     on_progress: Channel<SyncProgress>,
 ) -> Result<BackupReport, String> {
+    let _bg = hold_background();
     let api_key = api_key.unwrap_or_default();
     let with_key = |req: reqwest::RequestBuilder| {
         if api_key.is_empty() {
@@ -526,6 +570,53 @@ fn find_char(
         .ok_or_else(|| format!("Characteristic {uuid} not found on the device"))
 }
 
+/// Finds the device over BLE, wakes it into sync mode when needed, and
+/// returns its Wi-Fi status (with the IP once it is on a network). This
+/// removes the button-hold: the app can start a sync by itself.
+#[tauri::command]
+async fn find_device() -> Result<WifiStatus, String> {
+    let device = ble_find_device().await?;
+    device
+        .connect()
+        .await
+        .map_err(|e| format!("Bluetooth connect failed: {e}"))?;
+    let result = wake_over_connection(&device).await;
+    let _ = device.disconnect().await;
+    result
+}
+
+async fn wake_over_connection(device: &Peripheral) -> Result<WifiStatus, String> {
+    device.discover_services().await.map_err(err_str)?;
+    let chr_control = find_char(device, CHR_CONTROL)?;
+    let chr_status = find_char(device, CHR_STATUS)?;
+
+    let raw = device.read(&chr_status).await.map_err(err_str)?;
+    let status: WifiStatus = serde_json::from_slice(&raw).map_err(err_str)?;
+    if status.state == "off" {
+        device
+            .write(&chr_control, &[0x02], WriteType::WithResponse)
+            .await
+            .map_err(err_str)?;
+    }
+
+    let deadline = SystemTime::now() + Duration::from_secs(40);
+    loop {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let raw = device.read(&chr_status).await.map_err(err_str)?;
+        let status: WifiStatus =
+            serde_json::from_slice(&raw).map_err(err_str)?;
+        if (status.state == "sta" || status.state == "ap") && !status.ip.is_empty()
+        {
+            return Ok(status);
+        }
+        if SystemTime::now() > deadline {
+            return Err(
+                "The device woke up but did not reach Wi-Fi in time.".to_string()
+            );
+        }
+    }
+}
+
 /// Sends the home Wi-Fi credentials to the device over BLE, then polls the
 /// status characteristic until the device reports a final state.
 #[tauri::command]
@@ -601,6 +692,7 @@ pub fn run() {
             list_local_media,
             open_media,
             provision_wifi,
+            find_device,
             backup_to_cloud
         ])
         .run(tauri::generate_context!())

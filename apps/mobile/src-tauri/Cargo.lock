@@ -2340,6 +2340,7 @@ dependencies = [
  "filetime",
  "futures",
  "image",
+ "objc2 0.6.4",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

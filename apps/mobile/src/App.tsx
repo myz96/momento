@@ -123,6 +123,7 @@ function App() {
   const [autoBackupStr, setAutoBackupStr] = usePersistedState("autoBackup", "on");
   const [cloudKey, setCloudKey] = usePersistedState("cloudKey", "");
   const [cloudReadyStr, setCloudReadyStr] = usePersistedState("cloudReady", "off");
+  const [autoSyncStr, setAutoSyncStr] = usePersistedState("autoSync", "off");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [viewer, setViewer] = useState<{ file: LocalFile; src: string } | null>(
     null,
@@ -131,6 +132,8 @@ function App() {
   const [cloudState, setCloudState] = useState<LinkState>("unknown");
   const freeSpace = freeSpaceStr === "on";
   const autoBackup = autoBackupStr === "on";
+  const autoSync = autoSyncStr === "on";
+  const busyRef = useRef(false);
   // Auto-backup stays quiet until the cloud is actually configured: a
   // fresh install must not greet its user with a failure banner.
   const cloudReady =
@@ -180,41 +183,66 @@ function App() {
     }
   }
 
-  async function syncNow() {
-    setBusy(true);
-    setError("");
-    setDeviceState("busy");
-    setStatus("Starting sync…");
+  async function runSync(url: string): Promise<boolean> {
     const onProgress = new Channel<SyncProgress>();
     onProgress.onmessage = (p) => {
       setStatus(`Bringing in ${p.index} of ${p.total}…`);
     };
+    const synced = await invoke<LocalFile[]>("sync_device", {
+      base: url,
+      onProgress,
+    });
+    setDeviceState("ok");
+    setStatus(
+      synced.length === 0
+        ? "Nothing new on the device."
+        : `${synced.length} new capture(s) safely in your library. The device is clear.`,
+    );
+    await refreshMedia();
+    return true;
+  }
+
+  async function syncNow() {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    setError("");
+    setDeviceState("busy");
+    setStatus("Starting sync…");
     try {
-      const synced = await invoke<LocalFile[]>("sync_device", {
-        base,
-        onProgress,
-      });
-      setDeviceState("ok");
-      setStatus(
-        synced.length === 0
-          ? "Nothing new on the device."
-          : `${synced.length} new capture(s) safely in your library. The device is clear.`,
-      );
-      await refreshMedia();
-    } catch (e) {
-      console.error(e);
-      setDeviceState("down");
-      const raw = String(e);
-      setError(
-        raw.includes("not reachable")
-          ? "Could not find the device. Hold its CAM button for 1.5 seconds " +
-              "(the light blinks) and try again — first time? Open Settings " +
-              "and send it your Wi-Fi."
-          : raw,
-      );
-      setStatus("");
-      await refreshMedia();
+      await runSync(base);
+    } catch (first) {
+      console.error(first);
+      // The network path failed — find the device over Bluetooth and
+      // wake it, so nobody has to hold buttons or type addresses.
+      setStatus("Can't reach it over the network. Waking the device via Bluetooth…");
+      try {
+        const w = await invoke<WifiStatus>("find_device");
+        if (w.state === "sta" && w.ip) {
+          const url = `http://${w.ip}`;
+          setBase(url);
+          setStatus("Device is awake. Syncing…");
+          await runSync(url);
+        } else {
+          setDeviceState("down");
+          setStatus("");
+          setError(
+            "The device is awake, but only on its own Wi-Fi network. Join " +
+              "the Momento network — or send it your Wi-Fi once in Settings.",
+          );
+        }
+      } catch (second) {
+        console.error(second);
+        setDeviceState("down");
+        setStatus("");
+        setError(
+          "Could not find the device nearby. Make sure it has power, or " +
+            "open Settings to check its address.",
+        );
+        await refreshMedia();
+      }
     } finally {
+      busyRef.current = false;
       setBusy(false);
     }
   }
@@ -314,6 +342,38 @@ function App() {
       clearInterval(timer);
     };
   }, [autoBackup, cloudReady]);
+
+  // Hands-free loop: every few minutes, quietly look for the device over
+  // Bluetooth, wake it, pull new captures, and hand them to auto-backup.
+  useEffect(() => {
+    if (!autoSync) return;
+    const timer = setInterval(async () => {
+      if (busyRef.current || cloudBusyRef.current) return;
+      busyRef.current = true;
+      try {
+        const w = await invoke<WifiStatus>("find_device");
+        if (w.state === "sta" && w.ip) {
+          const synced = await invoke<LocalFile[]>("sync_device", {
+            base: `http://${w.ip}`,
+            onProgress: new Channel<SyncProgress>(),
+          });
+          setDeviceState("ok");
+          if (synced.length > 0) {
+            setStatus(`${synced.length} new capture(s) synced automatically.`);
+            await refreshMedia();
+            busyRef.current = false;
+            backupRef.current(true);
+            return;
+          }
+        }
+      } catch {
+        // The device is not nearby — quiet is correct.
+      } finally {
+        busyRef.current = false;
+      }
+    }, 3 * 60 * 1000);
+    return () => clearInterval(timer);
+  }, [autoSync, refreshMedia]);
 
   // Success messages fade on their own; errors stay until the next action.
   useEffect(() => {
@@ -564,6 +624,19 @@ function App() {
                   Check
                 </button>
               </div>
+              <label className="set-check">
+                <input
+                  type="checkbox"
+                  checked={autoSync}
+                  onChange={(e) =>
+                    setAutoSyncStr(e.currentTarget.checked ? "on" : "off")
+                  }
+                />
+                <span>
+                  Sync automatically when the device is nearby (checks over
+                  Bluetooth every few minutes)
+                </span>
+              </label>
               {status && <p className="set-status">{status}</p>}
               {error && <p className="set-error">{error}</p>}
             </section>

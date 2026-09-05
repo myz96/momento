@@ -19,6 +19,12 @@ static const char *TAG = "ble_prov";
 /* Characteristic ids passed as the access-callback arg. */
 enum { CHR_SSID = 2, CHR_PASS = 3, CHR_CONTROL = 4, CHR_STATUS = 5 };
 
+/* Control opcodes. */
+enum { CTL_APPLY_CREDS = 0x01, CTL_ENTER_SYNC = 0x02, CTL_EXIT_SYNC = 0x03 };
+
+static volatile bool s_sync_request;
+static volatile bool s_exit_request;
+
 /* UUID 6D6F6D65-6E74-6F00-0000-0000000000NN, bytes little-endian. */
 #define PROV_UUID128(last)                                                 \
     BLE_UUID128_INIT(last, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, \
@@ -76,15 +82,28 @@ static int chr_access(uint16_t conn_handle, uint16_t attr_handle,
         ESP_LOGI(TAG, "Password received (%u bytes)", len);
         return 0;
     case CHR_CONTROL:
-        if (len == 1 && buf[0] == 0x01) {
+        if (len != 1) {
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        }
+        switch (buf[0]) {
+        case CTL_APPLY_CREDS:
             if (s_ssid[0] == '\0') {
                 return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
             }
             ESP_LOGI(TAG, "Applying credentials for %s", s_ssid);
             wifi_sync_apply_credentials(s_ssid, s_pass);
             return 0;
+        case CTL_ENTER_SYNC:
+            ESP_LOGI(TAG, "App requests sync mode");
+            s_sync_request = true;
+            return 0;
+        case CTL_EXIT_SYNC:
+            ESP_LOGI(TAG, "App requests leaving sync mode");
+            s_exit_request = true;
+            return 0;
+        default:
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
         }
-        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
     default:
         return BLE_ATT_ERR_UNLIKELY;
     }
@@ -211,6 +230,20 @@ esp_err_t ble_prov_start(void)
     s_started = true;
     ESP_LOGI(TAG, "BLE provisioning on, advertising as %s", DEVICE_NAME);
     return ESP_OK;
+}
+
+bool ble_prov_take_sync_request(void)
+{
+    bool v = s_sync_request;
+    s_sync_request = false;
+    return v;
+}
+
+bool ble_prov_take_exit_request(void)
+{
+    bool v = s_exit_request;
+    s_exit_request = false;
+    return v;
 }
 
 void ble_prov_stop(void)

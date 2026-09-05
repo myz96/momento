@@ -454,12 +454,12 @@ static bool cam_hold_is_long(void)
     return false;
 }
 
-/* Runs sync mode until CAM is held again. The LED blinks the whole time. */
+/* Runs sync mode until CAM is held again or the app asks to leave.
+ * The LED blinks the whole time. BLE stays up throughout — it runs
+ * from boot so the app can wake the device remotely. */
 static void sync_mode(void)
 {
-    ble_prov_start(); /* provisioning stays available even when Wi-Fi fails */
     if (wifi_sync_start() != ESP_OK) {
-        ble_prov_stop();
         for (int i = 0; i < 5; i++) { /* fast error blink */
             gpio_set_level(PIN_LED, 1);
             vTaskDelay(pdMS_TO_TICKS(60));
@@ -473,6 +473,9 @@ static void sync_mode(void)
     while (true) {
         led_on = !led_on;
         gpio_set_level(PIN_LED, led_on);
+        if (ble_prov_take_exit_request()) {
+            break;
+        }
         if (button_pressed(PIN_BTN_CAM)) {
             if (cam_hold_is_long()) {
                 wait_release(PIN_BTN_CAM);
@@ -483,7 +486,6 @@ static void sync_mode(void)
         vTaskDelay(pdMS_TO_TICKS(250));
     }
 
-    ble_prov_stop();
     wifi_sync_stop();
     gpio_set_level(PIN_LED, 0);
 }
@@ -523,9 +525,16 @@ void app_main(void)
         gpio_set_level(PIN_LED, 0);
         vTaskDelay(pdMS_TO_TICKS(120));
     }
+    if (ble_prov_start() != ESP_OK) {
+        ESP_LOGW(TAG, "BLE unavailable; the app cannot wake the device");
+    }
     ESP_LOGI(TAG, "Ready. CAM = photo, hold CAM = sync mode. REC = start/stop recording.");
 
     while (true) {
+        if (ble_prov_take_sync_request()) {
+            ESP_LOGI(TAG, "Sync mode starts (app request)");
+            sync_mode();
+        }
         if (button_pressed(PIN_BTN_CAM)) {
             if (cam_hold_is_long()) {
                 ESP_LOGI(TAG, "CAM held, sync mode toggles on");

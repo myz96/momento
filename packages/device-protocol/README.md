@@ -23,11 +23,13 @@ mode. Both paths are live at the same time:
 | Password | `momento123` |
 | Base URL | `http://192.168.4.1` |
 
-## BLE provisioning
+## BLE control channel
 
-While sync mode is on, the device also advertises over BLE as `Momento`.
-The app writes the home Wi-Fi credentials once; the device stores them in
-NVS and reconnects in station mode.
+The device advertises over BLE as `Momento` whenever it has power, so
+the app can find it, provision Wi-Fi, and start or stop sync mode
+remotely — no button holds. The app's Sync button self-heals through
+this channel: on a failed network sync it wakes the device over BLE,
+reads its IP, and retries.
 
 GATT service `6D6F6D65-6E74-6F00-0000-000000000001`:
 
@@ -35,7 +37,7 @@ GATT service `6D6F6D65-6E74-6F00-0000-000000000001`:
 |----------------|-------------|--------|---------|
 | ssid | `…0002` | write | UTF-8 network name, 1–32 bytes |
 | password | `…0003` | write | UTF-8 password, 0–64 bytes |
-| control | `…0004` | write | `0x01` = save credentials and reconnect |
+| control | `…0004` | write | `0x01` save credentials and reconnect · `0x02` enter sync mode · `0x03` leave sync mode |
 | status | `…0005` | read | JSON `{"state":"sta","ip":"192.168.1.7","ssid":"Home"}` |
 
 `state` values: `sta` (on the home network; the SoftAP also stays up),
