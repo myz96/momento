@@ -26,9 +26,17 @@ rejects anything that could escape the storage directory.
 
 ## Storage
 
-Files land in `MOMENTO_MEDIA_DIR` (default `data/media`, gitignored).
-Uploads stage to a unique `.part` name and rename into place, so an
-interrupted upload never leaves a truncated file under a final name.
+Two backends behind one interface (`storage.py`), picked from the
+environment (`.env` is loaded at startup; see `.env.example`):
+
+- **DiskStorage** (default): files land in `MOMENTO_MEDIA_DIR`
+  (default `data/media`, gitignored). Uploads stage to a unique `.part`
+  name and rename into place, so an interrupted upload never leaves a
+  truncated file under a final name.
+- **R2Storage**: activates when all four `MOMENTO_R2_*` variables are
+  set (account id, access key id, secret, bucket). S3-compatible via
+  boto3; puts are atomic, so no staging is needed.
+
 The app skips uploads only when the listed name AND size match, so
 repeated backups are cheap and a truncated copy heals itself.
 

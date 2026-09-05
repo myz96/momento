@@ -1,31 +1,37 @@
-"""Media storage: uploads from the companion app land on disk.
+"""Media routes: uploads from the companion app.
 
-The storage directory comes from MOMENTO_MEDIA_DIR (default ./data/media).
-S3 or another object store can replace the disk later behind the same
-routes.
+The storage backend comes from the environment (see storage.py): local
+disk by default, Cloudflare R2 when the MOMENTO_R2_* variables are set.
 """
 
-import os
-import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
+from starlette.concurrency import run_in_threadpool
+
+from momento_backend.storage import MediaStorage, storage_from_env
 
 router = APIRouter(prefix="/media", tags=["media"])
 
 ALLOWED_SUFFIXES = {".jpg", ".jpeg", ".wav", ".avi"}
-CHUNK_BYTES = 1024 * 1024
+
+CONTENT_TYPES = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".wav": "audio/wav",
+    ".avi": "video/x-msvideo",
+}
 
 
-def media_dir() -> Path:
-    path = Path(os.environ.get("MOMENTO_MEDIA_DIR", "data/media"))
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+def get_storage() -> MediaStorage:
+    # Resolved per request so tests can swap MOMENTO_MEDIA_DIR; the boto3
+    # client behind R2Storage is cheap to construct.
+    return storage_from_env(ALLOWED_SUFFIXES)
 
 
 def safe_name(name: str) -> str:
-    """Rejects names that could escape the storage directory."""
+    """Rejects names that could escape the storage namespace."""
     if (
         not name
         or name != Path(name).name
@@ -39,39 +45,25 @@ def safe_name(name: str) -> str:
 @router.post("", status_code=201)
 async def upload_media(file: UploadFile) -> dict[str, int | str]:
     name = safe_name(file.filename or "")
-    target = media_dir() / name
-    # Stage then rename: an interrupted upload never leaves a truncated
-    # file under the final name, so the client's size check stays honest.
-    # The stage name is unique per request so concurrent uploads of the
-    # same name cannot interleave.
-    stage = target.with_name(f"{target.name}.{uuid.uuid4().hex}.part")
-    size = 0
-    try:
-        with stage.open("wb") as out:
-            while chunk := await file.read(CHUNK_BYTES):
-                out.write(chunk)
-                size += len(chunk)
-    except Exception:
-        stage.unlink(missing_ok=True)
-        raise
-    stage.replace(target)
+    storage = get_storage()
+    size = await run_in_threadpool(storage.save, name, file.file)
     return {"name": name, "size": size}
 
 
 @router.get("")
 async def list_media() -> list[dict[str, int | str]]:
-    entries = [
-        {"name": p.name, "size": p.stat().st_size}
-        for p in media_dir().iterdir()
-        if p.is_file() and p.suffix.lower() in ALLOWED_SUFFIXES
-    ]
-    entries.sort(key=lambda e: e["name"])
-    return entries
+    storage = get_storage()
+    entries = await run_in_threadpool(storage.list)
+    return [{"name": e.name, "size": e.size} for e in entries]
 
 
 @router.get("/{name}")
-async def download_media(name: str) -> FileResponse:
-    target = media_dir() / safe_name(name)
-    if not target.is_file():
+async def download_media(name: str) -> StreamingResponse:
+    name = safe_name(name)
+    storage = get_storage()
+    if not await run_in_threadpool(storage.exists, name):
         raise HTTPException(status_code=404, detail=f"No such file: {name}")
-    return FileResponse(target)
+    media_type = CONTENT_TYPES.get(
+        Path(name).suffix.lower(), "application/octet-stream"
+    )
+    return StreamingResponse(storage.stream(name), media_type=media_type)
