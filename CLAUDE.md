@@ -2,7 +2,7 @@
 
 This is a polyglot monorepo for Momento — a camera/audio capture device that mounts to the back of an iPhone via MagSafe. It captures photos and voice recordings throughout the day so users can review their moments later, with optional AI-assisted analysis for pattern detection and summarization.
 
-The companion app runs on macOS and iOS (built with Tauri 2.0). The firmware lives on an ESP32-S3 with an SD card. Media sync is device → app first; cloud upload will come later.
+The companion app runs on macOS and iOS (built with Tauri 2.0). The firmware lives on an ESP32-S3 with an SD card. Media flows device → app → backend; a real cloud host for the backend is still pending.
 
 ## Project Structure
 
@@ -31,7 +31,7 @@ momento/
 ### Firmware (`apps/firmware/`)
 ESP-IDF firmware for Seeed XIAO ESP32-S3 Sense board. Captures photos and video clips with audio, stores to SD card. Uses esp32-camera component.
 
-**Tech**: ESP-IDF 6.1, ESP32-S3, OV2640/OV5640 camera, I2S MEMS mic, FAT/SDMMC
+**Tech**: ESP-IDF 6.1, ESP32-S3, OV2640/OV5640 camera, I2S MEMS mic, FAT over SD-SPI
 **Build**: `just firmware-build` or `cd apps/firmware && idf.py build`
 **Details**: See `apps/firmware/CLAUDE.md`
 
@@ -45,7 +45,7 @@ Tauri 2.0 app for macOS and iOS. Rust backend with a React frontend. Syncs media
 > Tauri supports Windows, Linux, and Android, but Momento targets macOS and iOS for now.
 
 ### Backend (`apps/backend/`)
-Python FastAPI backend for cloud sync, user accounts, media processing. Scaffolded with a health route; cloud sync is a later phase.
+Python FastAPI backend for cloud sync, user accounts, media processing. Serves health and `/media` routes (upload, list, download); the app's cloud backup uses them. A real cloud host is still pending.
 
 **Tech**: Python 3.12, FastAPI, uv, pytest, ruff
 **Build**: `just backend-dev` or `cd apps/backend && uv run uvicorn --app-dir src momento_backend.main:app --reload`
@@ -95,7 +95,7 @@ Each sub-app defines its own style in its CLAUDE.md. No cross-app style enforcem
 ## Device Communication Protocol
 
 The sync contract is documented in `packages/device-protocol/README.md`. Current state:
-- **Wi-Fi**: the device runs a SoftAP + HTTP file server in sync mode; the app pulls files and clears the SD card
-- **Bluetooth Low Energy (BLE)**: planned for discovery and pairing
-- **Cloud sync**: app → backend will come later
+- **Wi-Fi**: in sync mode the device runs AP+station (its own SoftAP always up, plus the provisioned home network) with an HTTP file server; the app pulls files and clears the SD card
+- **Bluetooth Low Energy (BLE)**: implemented for Wi-Fi credential provisioning (`ble_prov.c` ↔ `provision_wifi`)
+- **Cloud sync**: implemented app → backend (`/media` routes) with optional free-space offload; a real cloud host is still pending
 - **Media formats**: JPEG (photos), WAV (audio), MJPEG AVI (clips)

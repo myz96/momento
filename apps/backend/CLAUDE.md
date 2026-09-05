@@ -27,8 +27,10 @@ rejects anything that could escape the storage directory.
 ## Storage
 
 Files land in `MOMENTO_MEDIA_DIR` (default `data/media`, gitignored).
-The app skips uploads for names the backend already lists, so repeated
-backups are cheap and safe.
+Uploads stage to a unique `.part` name and rename into place, so an
+interrupted upload never leaves a truncated file under a final name.
+The app skips uploads only when the listed name AND size match, so
+repeated backups are cheap and a truncated copy heals itself.
 
 ## Layout
 

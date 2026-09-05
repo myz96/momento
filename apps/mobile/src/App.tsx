@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Channel, convertFileSrc, invoke } from "@tauri-apps/api/core";
 import "./App.css";
 
@@ -67,8 +67,20 @@ function displayName(name: string): string {
   return name.replace(/^\d+_/, "");
 }
 
+function usePersistedState(
+  key: string,
+  initial: string,
+): [string, (v: string) => void] {
+  const [value, setValue] = useState(() => localStorage.getItem(key) ?? initial);
+  const set = (v: string) => {
+    setValue(v);
+    localStorage.setItem(key, v);
+  };
+  return [value, set];
+}
+
 function App() {
-  const [base, setBase] = useState("http://momento.local");
+  const [base, setBase] = usePersistedState("deviceUrl", "http://momento.local");
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -78,11 +90,17 @@ function App() {
   const [provStatus, setProvStatus] = useState("");
   const [provError, setProvError] = useState("");
   const [provBusy, setProvBusy] = useState(false);
-  const [backendUrl, setBackendUrl] = useState("http://localhost:8000");
+  const [backendUrl, setBackendUrl] = usePersistedState(
+    "backendUrl",
+    "http://localhost:8000",
+  );
   const [cloudStatus, setCloudStatus] = useState("");
   const [cloudError, setCloudError] = useState("");
   const [cloudBusy, setCloudBusy] = useState(false);
-  const [freeSpace, setFreeSpace] = useState(true);
+  const [freeSpaceStr, setFreeSpaceStr] = usePersistedState("freeSpace", "on");
+  const [autoBackupStr, setAutoBackupStr] = usePersistedState("autoBackup", "on");
+  const freeSpace = freeSpaceStr === "on";
+  const autoBackup = autoBackupStr === "on";
 
   const refreshMedia = useCallback(async () => {
     try {
@@ -162,39 +180,80 @@ function App() {
     }
   }
 
-  async function backupToCloud() {
-    setCloudBusy(true);
-    setCloudError("");
-    setCloudStatus("Checking what the cloud already has…");
-    const onProgress = new Channel<SyncProgress>();
-    onProgress.onmessage = (p) => {
-      setCloudStatus(`Uploading ${p.index}/${p.total} — ${displayName(p.file)}`);
-    };
-    try {
-      const report = await invoke<BackupReport>("backup_to_cloud", {
-        backend: backendUrl,
-        freeSpace,
-        onProgress,
-      });
-      const parts = [
-        report.uploaded === 0
-          ? "Nothing new to upload."
-          : `Uploaded ${report.uploaded} file(s).`,
-      ];
-      if (report.freed > 0) {
-        parts.push(
-          `Freed ${formatBytes(report.freed_bytes)} on this device (${report.freed} file(s) now stream from the cloud).`,
-        );
+  const cloudBusyRef = useRef(false);
+  const autoFailedRef = useRef(false);
+
+  const backupToCloud = useCallback(
+    async (silent: boolean) => {
+      if (cloudBusyRef.current) return;
+      cloudBusyRef.current = true;
+      setCloudBusy(true);
+      setCloudError("");
+      if (!silent) setCloudStatus("Checking what the cloud already has…");
+      const onProgress = new Channel<SyncProgress>();
+      onProgress.onmessage = (p) => {
+        // Auto runs stay quiet until they have a result to report.
+        if (!silent) {
+          setCloudStatus(
+            `Uploading ${p.index}/${p.total} — ${displayName(p.file)}`,
+          );
+        }
+      };
+      try {
+        const report = await invoke<BackupReport>("backup_to_cloud", {
+          backend: backendUrl,
+          freeSpace,
+          onProgress,
+        });
+        const parts = [
+          report.uploaded === 0
+            ? "Nothing new to upload."
+            : `Uploaded ${report.uploaded} file(s).`,
+        ];
+        if (report.freed > 0) {
+          parts.push(
+            `Freed ${formatBytes(report.freed_bytes)} on this device (${report.freed} file(s) now stream from the cloud).`,
+          );
+        }
+        if (!silent || report.uploaded > 0 || report.freed > 0) {
+          setCloudStatus(parts.join(" "));
+        } else if (autoFailedRef.current) {
+          // A quiet success after a failure clears the stale warning.
+          setCloudStatus("Auto-backup is working again. Everything is backed up.");
+        }
+        autoFailedRef.current = false;
+        await refreshMedia();
+      } catch (e) {
+        if (!silent) {
+          setCloudStatus("");
+          setCloudError(String(e));
+        } else {
+          // Quiet, but never invisible: a broken auto-backup must surface.
+          autoFailedRef.current = true;
+          setCloudStatus("Auto-backup failed. Retrying every 5 minutes.");
+        }
+      } finally {
+        cloudBusyRef.current = false;
+        setCloudBusy(false);
       }
-      setCloudStatus(parts.join(" "));
-      await refreshMedia();
-    } catch (e) {
-      setCloudStatus("");
-      setCloudError(String(e));
-    } finally {
-      setCloudBusy(false);
-    }
-  }
+    },
+    [backendUrl, freeSpace, refreshMedia],
+  );
+
+  // The ref pattern keeps the timers stable: typing in the URL field must
+  // not fire a backup against a half-typed address.
+  const backupRef = useRef(backupToCloud);
+  backupRef.current = backupToCloud;
+
+  useEffect(() => {
+    if (!autoBackup) return;
+    const kickoff = setTimeout(() => backupRef.current(true), 3000);
+    const timer = setInterval(() => backupRef.current(true), 5 * 60 * 1000);
+    return () => {
+      clearTimeout(kickoff);
+      clearInterval(timer);
+    };
+  }, [autoBackup]);
 
   return (
     <main className="container">
@@ -271,7 +330,11 @@ function App() {
             placeholder="http://localhost:8000"
             disabled={cloudBusy}
           />
-          <button className="primary" onClick={backupToCloud} disabled={cloudBusy}>
+          <button
+            className="primary"
+            onClick={() => backupToCloud(false)}
+            disabled={cloudBusy}
+          >
             {cloudBusy ? "Uploading…" : "Back up now"}
           </button>
         </div>
@@ -279,10 +342,18 @@ function App() {
           <input
             type="checkbox"
             checked={freeSpace}
-            onChange={(e) => setFreeSpace(e.currentTarget.checked)}
+            onChange={(e) => setFreeSpaceStr(e.currentTarget.checked ? "on" : "off")}
             disabled={cloudBusy}
           />
           Free up space after backup (keep thumbnails, stream originals)
+        </label>
+        <label className="checkline">
+          <input
+            type="checkbox"
+            checked={autoBackup}
+            onChange={(e) => setAutoBackupStr(e.currentTarget.checked ? "on" : "off")}
+          />
+          Back up automatically when the cloud is reachable
         </label>
         {cloudStatus && <p className="status">{cloudStatus}</p>}
         {cloudError && <p className="error">{cloudError}</p>}

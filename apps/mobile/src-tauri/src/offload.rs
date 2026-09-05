@@ -40,7 +40,17 @@ pub fn load_index(data_dir: &Path) -> Vec<OffloadedFile> {
 
 pub fn save_index(data_dir: &Path, index: &[OffloadedFile]) -> Result<(), String> {
     let json = serde_json::to_vec_pretty(index).map_err(|e| e.to_string())?;
-    fs::write(index_path(data_dir), json).map_err(|e| e.to_string())
+    // Temp-write, fsync, then rename: a crash or power loss mid-save can
+    // never leave a corrupt index that orphans every offloaded entry.
+    let tmp = index_path(data_dir).with_extension("json.tmp");
+    (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(&json)?;
+        f.sync_all()
+    })()
+    .map_err(|e| e.to_string())?;
+    fs::rename(&tmp, index_path(data_dir)).map_err(|e| e.to_string())
 }
 
 /// Finds the first JPEG frame inside an MJPEG AVI. The device's clips are

@@ -6,6 +6,7 @@ routes.
 """
 
 import os
+import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, UploadFile
@@ -39,11 +40,21 @@ def safe_name(name: str) -> str:
 async def upload_media(file: UploadFile) -> dict[str, int | str]:
     name = safe_name(file.filename or "")
     target = media_dir() / name
+    # Stage then rename: an interrupted upload never leaves a truncated
+    # file under the final name, so the client's size check stays honest.
+    # The stage name is unique per request so concurrent uploads of the
+    # same name cannot interleave.
+    stage = target.with_name(f"{target.name}.{uuid.uuid4().hex}.part")
     size = 0
-    with target.open("wb") as out:
-        while chunk := await file.read(CHUNK_BYTES):
-            out.write(chunk)
-            size += len(chunk)
+    try:
+        with stage.open("wb") as out:
+            while chunk := await file.read(CHUNK_BYTES):
+                out.write(chunk)
+                size += len(chunk)
+    except Exception:
+        stage.unlink(missing_ok=True)
+        raise
+    stage.replace(target)
     return {"name": name, "size": size}
 
 

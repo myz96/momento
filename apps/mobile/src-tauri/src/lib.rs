@@ -18,6 +18,11 @@ use uuid::Uuid;
 const DEFAULT_BASE: &str = "http://192.168.4.1";
 const BLE_DEVICE_NAME: &str = "Momento";
 
+/// One store operation at a time: a backup snapshotting the media dir
+/// while a sync writes into it could upload a partial file, "verify"
+/// it, and then delete the completed original.
+static STORE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 const CHR_SSID: Uuid = Uuid::from_u128(0x6d6f6d65_6e74_6f00_0000_000000000002);
 const CHR_PASS: Uuid = Uuid::from_u128(0x6d6f6d65_6e74_6f00_0000_000000000003);
 const CHR_CONTROL: Uuid = Uuid::from_u128(0x6d6f6d65_6e74_6f00_0000_000000000004);
@@ -34,7 +39,13 @@ struct DeviceInfo {
 struct DeviceFile {
     name: String,
     size: u64,
+    /// Capture time in unix seconds. Only real once the device clock is
+    /// set (SNTP in sync mode); bogus values stay near the 1980 epoch.
+    #[serde(default)]
+    mtime: i64,
 }
+
+const CREDIBLE_MTIME_FLOOR: i64 = 1_609_459_200; // 2021-01-01
 
 #[derive(Serialize, Clone)]
 struct SyncProgress {
@@ -149,8 +160,22 @@ async fn sync_device(
     base: Option<String>,
     on_progress: Channel<SyncProgress>,
 ) -> Result<Vec<LocalFile>, String> {
+    let _guard = STORE_LOCK.lock().await;
     let base = base_url(base);
     let client = http_client()?;
+
+    // Reap stale .part files from earlier crashes; they are invisible to
+    // listings but waste disk.
+    if let Ok(dir) = media_dir(&app) {
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.extension().is_some_and(|e| e == "part") {
+                    let _ = fs::remove_file(&p);
+                }
+            }
+        }
+    }
 
     let files: Vec<DeviceFile> = client
         .get(format!("{base}/api/files"))
@@ -200,8 +225,26 @@ async fn sync_device(
             .duration_since(UNIX_EPOCH)
             .map_err(err_str)?
             .as_millis();
+        // Write to a .part name, force to disk, then rename: listings
+        // never see a partial file, and the device copy is only deleted
+        // after the local bytes are durable.
         let path = dir.join(format!("{stamp}_{}", f.name));
-        fs::write(&path, &bytes).map_err(err_str)?;
+        let part = dir.join(format!("{stamp}_{}.part", f.name));
+        let write_result = (|| -> std::io::Result<()> {
+            use std::io::Write;
+            let mut out = fs::File::create(&part)?;
+            out.write_all(&bytes)?;
+            out.sync_all()
+        })();
+        if let Err(e) = write_result {
+            let _ = fs::remove_file(&part);
+            return Err(format!("Saving {} failed: {e}", f.name));
+        }
+        fs::rename(&part, &path).map_err(err_str)?;
+        if f.mtime > CREDIBLE_MTIME_FLOOR {
+            let t = filetime::FileTime::from_unix_time(f.mtime, 0);
+            let _ = filetime::set_file_mtime(&path, t);
+        }
 
         client
             .delete(format!("{base}/api/files/{}", f.name))
@@ -225,10 +268,22 @@ fn list_local_media(app: AppHandle) -> Result<Vec<LocalFile>, String> {
         let entry = entry.map_err(err_str)?;
         let path = entry.path();
         if path.is_file() && kind_of(&path.to_string_lossy()) != "other" {
-            out.push(local_file_meta(&path)?);
+            // A file can vanish between read_dir and stat when a backup
+            // offloads it concurrently; skip it rather than fail the
+            // whole listing.
+            if let Ok(meta) = local_file_meta(&path) {
+                out.push(meta);
+            }
         }
     }
+    // A cloud entry whose full file still exists locally is a crash
+    // leftover; show the local copy only.
+    let local_names: std::collections::HashSet<String> =
+        out.iter().map(|f| f.name.clone()).collect();
     for f in offload::load_index(&data_dir(&app)?) {
+        if local_names.contains(&f.name) {
+            continue;
+        }
         out.push(LocalFile {
             name: f.name,
             path: String::new(),
@@ -282,6 +337,7 @@ async fn backup_to_cloud(
     free_space: bool,
     on_progress: Channel<SyncProgress>,
 ) -> Result<BackupReport, String> {
+    let _guard = STORE_LOCK.lock().await;
     let backend = {
         let b = backend.unwrap_or_default();
         let b = b.trim();
@@ -309,9 +365,11 @@ async fn backup_to_cloud(
     let local = list_local_media(app.clone())?;
     let local: Vec<&LocalFile> =
         local.iter().filter(|f| f.location == "local").collect();
+    // A name whose cloud size differs is a truncated earlier upload:
+    // upload it again (the backend overwrite heals the copy).
     let pending: Vec<&&LocalFile> = local
         .iter()
-        .filter(|f| !cloud_sizes.contains_key(&f.name))
+        .filter(|f| cloud_sizes.get(&f.name) != Some(&f.size))
         .collect();
 
     let total = pending.len() as u32;
@@ -357,27 +415,45 @@ async fn backup_to_cloud(
         let root = data_dir(&app)?;
         let thumbs = offload::thumbs_dir(&root)?;
         let mut index = offload::load_index(&root);
+        let mut delete_failures = 0u32;
         for f in &local {
             if verified.get(&f.name) != Some(&f.size) {
                 continue; // not in the cloud, or the size differs: keep it
             }
             let src = PathBuf::from(&f.path);
-            let thumb = match offload::make_thumbnail(&src, &f.kind, &thumbs) {
-                Ok(t) => t,
-                Err(_) => continue, // keep the full file when no thumbnail
-            };
-            index.push(OffloadedFile {
-                name: f.name.clone(),
-                size: f.size,
-                kind: f.kind.clone(),
-                modified_ms: f.modified_ms,
-                thumb: thumb.map(|p| p.to_string_lossy().to_string()),
-            });
-            fs::remove_file(&src).map_err(err_str)?;
+            // A name already in the index is a crash leftover whose
+            // delete did not land: skip the bookkeeping, retry the
+            // delete. Otherwise persist the entry before the file goes,
+            // so a crash leaves a duplicate, never a vanished file.
+            if !index.iter().any(|e| e.name == f.name) {
+                let thumb = match offload::make_thumbnail(&src, &f.kind, &thumbs)
+                {
+                    Ok(t) => t,
+                    Err(_) => continue, // keep the full file when no thumbnail
+                };
+                index.push(OffloadedFile {
+                    name: f.name.clone(),
+                    size: f.size,
+                    kind: f.kind.clone(),
+                    modified_ms: f.modified_ms,
+                    thumb: thumb.map(|p| p.to_string_lossy().to_string()),
+                });
+                offload::save_index(&root, &index)?;
+            }
+            if fs::remove_file(&src).is_err() {
+                delete_failures += 1;
+                continue; // still local; the listing hides the cloud twin
+            }
             freed += 1;
             freed_bytes += f.size;
         }
-        offload::save_index(&root, &index)?;
+        if delete_failures > 0 {
+            return Err(format!(
+                "{delete_failures} file(s) could not be removed locally \
+                 (in use by another app?). They stay safe and the next \
+                 backup retries."
+            ));
+        }
     }
 
     Ok(BackupReport {
@@ -487,26 +563,24 @@ async fn provision_over_connection(
         .await
         .map_err(err_str)?;
 
-    // The device restarts its Wi-Fi and joins the network; the join can
-    // take up to ~25 s including the retry cycle.
-    let deadline = SystemTime::now() + Duration::from_secs(40);
+    // "ap" is not a failure: the SoftAP stays up while the station keeps
+    // retrying the join, so the status reads "ap" until the join lands.
+    // Poll for "sta" and give a patient verdict on timeout.
+    let deadline = SystemTime::now() + Duration::from_secs(45);
     loop {
         tokio::time::sleep(Duration::from_secs(2)).await;
         let raw = device.read(&chr_status).await.map_err(err_str)?;
         let status: WifiStatus =
             serde_json::from_slice(&raw).map_err(err_str)?;
-        match status.state.as_str() {
-            "sta" => return Ok(status),
-            "ap" => {
-                return Err(format!(
-                    "The device could not join \"{ssid}\" and fell back to \
-                     its own network. Check the network name and password."
-                ))
-            }
-            _ => {}
+        if status.state == "sta" {
+            return Ok(status);
         }
         if SystemTime::now() > deadline {
-            return Err("Timed out while the device joined the network.".to_string());
+            return Err(format!(
+                "The device has not joined \"{ssid}\" yet. It keeps trying \
+                 in the background. If it never appears, check the network \
+                 name and password and send them again."
+            ));
         }
     }
 }

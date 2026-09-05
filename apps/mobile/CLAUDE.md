@@ -22,8 +22,8 @@ The contract is in `packages/device-protocol/README.md`. The flow:
    Wi-Fi credentials from the app over BLE (`provision_wifi`, btleplug).
    The device stores them and joins the home network as `momento.local`.
 2. For a sync, the user holds CAM for 1.5 s and presses **Sync now**.
-   Without setup, the device falls back to its own `Momento` network
-   (password `momento123`, base `http://192.168.4.1`).
+   The device's own `Momento` network (password `momento123`, base
+   `http://192.168.4.1`) is always up too — the radio runs AP+station.
 3. Rust command `sync_device` downloads each file, verifies the byte
    count, stores it under `$APPDATA/media/` with an epoch-ms prefix, then
    deletes it from the device. Progress streams to the UI over a
@@ -33,8 +33,11 @@ The contract is in `packages/device-protocol/README.md`. The flow:
    player via `open_media` (web views do not decode MJPEG AVI).
 
 Cloud backup: `backup_to_cloud` uploads the local library to the backend
-(`/media` routes, default `http://localhost:8000`) and skips files the
-backend already lists. With `free_space` (UI checkbox, default on), each
+(`/media` routes, default `http://localhost:8000`) and skips files whose
+name AND size the backend already lists (a size mismatch re-uploads to
+heal a truncated copy). With "Back up automatically" (default on) the
+UI runs a silent backup 3 s after launch and every 5 minutes; sync and
+backup are serialized by a Rust-side STORE_LOCK mutex. With `free_space` (UI checkbox, default on), each
 size-verified upload is then offloaded: `src-tauri/src/offload.rs` writes
 a thumbnail (photos directly; clips via the first MJPEG frame in the AVI),
 records the entry in `$APPDATA/offloaded.json`, and deletes the full local
@@ -44,8 +47,9 @@ full file local; a file is never deleted before its cloud copy is verified.
 
 Rust commands live in `src-tauri/src/lib.rs`: `device_info`, `sync_device`,
 `list_local_media`, `open_media`, `provision_wifi`, `backup_to_cloud`. The asset protocol is
-scoped to `$APPDATA/media/**` in `tauri.conf.json` so the webview can load
-local media with `convertFileSrc`. `src-tauri/Info.plist` carries the
+scoped to `$APPDATA/media/**` and `$APPDATA/thumbs/**` in
+`tauri.conf.json` so the webview can load local media and thumbnails with
+`convertFileSrc`. `src-tauri/Info.plist` carries the
 macOS/iOS Bluetooth and local-network usage descriptions.
 
 ## Core App Purpose
