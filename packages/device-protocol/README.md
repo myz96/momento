@@ -7,15 +7,15 @@ The app implements the client side (`apps/mobile/src-tauri/src/lib.rs`).
 ## Transport
 
 Hold the CAM button for 1.5 s to toggle sync mode (the status LED blinks).
-In sync mode the device runs an HTTP server and picks a network in this
-order:
+In sync mode the device runs an HTTP server, with the radio in AP+station
+mode. Both paths are live at the same time:
 
-1. **Station mode** — the device joins the home network with credentials
-   stored in NVS (see "BLE provisioning" below). It announces itself as
-   `momento.local` via mDNS. Base URL: `http://momento.local` or
-   `http://<device-ip>`.
-2. **SoftAP fallback** — no stored credentials, or the join fails. The
-   device creates its own network.
+1. **SoftAP** — always up for the whole session, as the reliable path.
+2. **Station** — the device keeps retrying the home network stored in
+   NVS (see "BLE provisioning" below) until the join lands, then it is
+   also reachable as `momento.local` (mDNS) or `http://<device-ip>`.
+   The retry pauses while a client is connected to the SoftAP. A join
+   also sets the device clock over SNTP, which makes `mtime` real.
 
 | SoftAP item | Value |
 |------|-------|
@@ -38,10 +38,13 @@ GATT service `6D6F6D65-6E74-6F00-0000-000000000001`:
 | control | `…0004` | write | `0x01` = save credentials and reconnect |
 | status | `…0005` | read | JSON `{"state":"sta","ip":"192.168.1.7","ssid":"Home"}` |
 
-`state` values: `sta` (on the home network), `ap` (fallback SoftAP),
-`connecting`, `off`. Provisioning flow: write ssid → write password →
-write control `0x01` → poll status every 2 s. `sta` means success; `ap`
-means the join failed and the credentials are wrong.
+`state` values: `sta` (on the home network; the SoftAP also stays up),
+`ap` (SoftAP only; the station keeps retrying in the background), `off`.
+Provisioning flow: write ssid → write password → write control `0x01` →
+poll status every 2 s until `sta` or a client-side deadline (~45 s).
+`ap` is NOT a failure signal — the join may simply not have landed yet,
+and the device retries forever. Only a deadline expiry suggests wrong
+credentials.
 
 ## Endpoints
 
@@ -60,10 +63,16 @@ Returns the list of media files on the SD card. The list contains only
 
 ```json
 [
-  { "name": "PHOTO_001.JPG", "size": 123456 },
-  { "name": "AUD_001.WAV", "size": 456789 }
+  { "name": "PHOTO_001.JPG", "size": 123456, "mtime": 1787917687 },
+  { "name": "AUD_001.WAV", "size": 456789, "mtime": 1787917694 }
 ]
 ```
+
+`mtime` is the capture time in unix seconds, from the FAT timestamp.
+The device has no battery-backed clock: values are only real after an
+SNTP sync (station mode with internet) in the current power session.
+Before that, FAT reports its 1980 epoch — clients must treat any value
+before ~2021 as unknown and fall back to their own receive time.
 
 ### `GET /api/files/{name}`
 
@@ -103,4 +112,5 @@ removes a file the app does not hold.
 ## Future
 
 - BLE command to enter sync mode remotely, without the button hold.
-- App → backend upload for cloud storage and AI analysis.
+- A hosted backend with object storage (the app → backend upload already
+  exists against a local backend).

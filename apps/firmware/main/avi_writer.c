@@ -1,14 +1,15 @@
-/* Minimal MJPEG AVI writer.
+/* Streaming MJPEG AVI writer.
  *
  * Layout: RIFF('AVI ' LIST('hdrl' avih LIST('strl' strh strf))
  *                     LIST('movi' '00dc'...) 'idx1').
- * All values are little-endian; the ESP32-S3 is little-endian, so plain
- * fwrite of integers is correct.
+ * The header is written with placeholder sizes at open and patched at
+ * finish. All values are little-endian, matching the ESP32-S3.
  */
 
-#include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 
 #include "avi_writer.h"
@@ -18,63 +19,59 @@ static const char *TAG = "avi";
 #define AVIF_HASINDEX  0x00000010
 #define AVIIF_KEYFRAME 0x00000010
 
+#define INDEX_INITIAL_CAP 1024
+
 static void put_u32(FILE *f, uint32_t v) { fwrite(&v, 4, 1, f); }
 static void put_u16(FILE *f, uint16_t v) { fwrite(&v, 2, 1, f); }
 static void put_tag(FILE *f, const char *tag) { fwrite(tag, 4, 1, f); }
 
 static uint32_t padded(uint32_t len) { return (len + 1) & ~1u; }
 
-esp_err_t avi_write_mjpeg(const char *path, const uint8_t *frame_data,
-                          const avi_frame_ref_t *frames, size_t frame_count,
-                          uint16_t width, uint16_t height, uint64_t duration_us)
+esp_err_t avi_stream_open(avi_stream_t *s, const char *path, uint16_t width,
+                          uint16_t height)
 {
-    if (frame_count == 0 || duration_us == 0) {
-        ESP_LOGE(TAG, "No frames to write");
-        return ESP_ERR_INVALID_ARG;
+    memset(s, 0, sizeof(*s));
+    s->width = width;
+    s->height = height;
+    s->movi_bytes = 4; /* the 'movi' type tag */
+
+    s->frame_lens = heap_caps_malloc(INDEX_INITIAL_CAP * sizeof(uint32_t),
+                                     MALLOC_CAP_SPIRAM);
+    if (!s->frame_lens) {
+        ESP_LOGE(TAG, "Index allocation failed");
+        return ESP_ERR_NO_MEM;
     }
+    s->frame_cap = INDEX_INITIAL_CAP;
 
-    uint32_t movi_size = 4; /* 'movi' type tag */
-    uint32_t max_frame = 0;
-    for (size_t i = 0; i < frame_count; i++) {
-        movi_size += 8 + padded(frames[i].len);
-        if (frames[i].len > max_frame) {
-            max_frame = frames[i].len;
-        }
-    }
-    uint32_t idx1_size = 16 * (uint32_t)frame_count;
-    /* hdrl list data: type(4) + avih chunk(8+56) + strl list(8+116) */
-    uint32_t hdrl_size = 4 + 64 + 124;
-    uint32_t riff_size = 4 + (8 + hdrl_size) + (8 + movi_size) + (8 + idx1_size);
-
-    uint32_t usec_per_frame = (uint32_t)(duration_us / frame_count);
-    /* fps = rate / scale */
-    uint32_t rate = (uint32_t)frame_count * 1000u;
-    uint32_t scale = (uint32_t)(duration_us / 1000u);
-
-    FILE *f = fopen(path, "wb");
-    if (!f) {
+    s->f = fopen(path, "wb");
+    if (!s->f) {
         ESP_LOGE(TAG, "Cannot open %s", path);
+        heap_caps_free(s->frame_lens);
+        s->frame_lens = NULL;
         return ESP_FAIL;
     }
+    FILE *f = s->f;
 
     put_tag(f, "RIFF");
-    put_u32(f, riff_size);
+    s->pos_riff_size = ftell(f);
+    put_u32(f, 0); /* patched on finish */
     put_tag(f, "AVI ");
 
     put_tag(f, "LIST");
-    put_u32(f, hdrl_size);
+    put_u32(f, 4 + 64 + 124); /* hdrl: type + avih chunk + strl list */
     put_tag(f, "hdrl");
 
     put_tag(f, "avih");
     put_u32(f, 56);
-    put_u32(f, usec_per_frame);
-    put_u32(f, max_frame * 15); /* rough max bytes per second */
-    put_u32(f, 0);              /* padding granularity */
+    s->pos_avih = ftell(f);
+    put_u32(f, 0); /* usec per frame, patched */
+    put_u32(f, 0); /* max bytes per second, patched */
+    put_u32(f, 0); /* padding granularity */
     put_u32(f, AVIF_HASINDEX);
-    put_u32(f, (uint32_t)frame_count);
+    put_u32(f, 0); /* total frames, patched */
     put_u32(f, 0); /* initial frames */
     put_u32(f, 1); /* streams */
-    put_u32(f, max_frame);
+    put_u32(f, 0); /* buffer size, patched */
     put_u32(f, width);
     put_u32(f, height);
     put_u32(f, 0);
@@ -88,17 +85,18 @@ esp_err_t avi_write_mjpeg(const char *path, const uint8_t *frame_data,
 
     put_tag(f, "strh");
     put_u32(f, 56);
+    s->pos_strh = ftell(f);
     put_tag(f, "vids");
     put_tag(f, "MJPG");
     put_u32(f, 0); /* flags */
     put_u16(f, 0); /* priority */
     put_u16(f, 0); /* language */
     put_u32(f, 0); /* initial frames */
-    put_u32(f, scale);
-    put_u32(f, rate);
+    put_u32(f, 0); /* scale, patched */
+    put_u32(f, 0); /* rate, patched */
     put_u32(f, 0); /* start */
-    put_u32(f, (uint32_t)frame_count);
-    put_u32(f, max_frame);
+    put_u32(f, 0); /* length, patched */
+    put_u32(f, 0); /* buffer size, patched */
     put_u32(f, 0xFFFFFFFF); /* quality: default */
     put_u32(f, 0);          /* sample size */
     put_u16(f, 0);          /* rcFrame */
@@ -121,34 +119,135 @@ esp_err_t avi_write_mjpeg(const char *path, const uint8_t *frame_data,
     put_u32(f, 0);
 
     put_tag(f, "LIST");
-    put_u32(f, movi_size);
+    s->pos_movi_size = ftell(f);
+    put_u32(f, 0); /* patched on finish */
     put_tag(f, "movi");
+    return ESP_OK;
+}
 
-    for (size_t i = 0; i < frame_count; i++) {
-        put_tag(f, "00dc");
-        put_u32(f, frames[i].len);
-        fwrite(frame_data + frames[i].offset, 1, frames[i].len, f);
-        if (frames[i].len & 1) {
-            fputc(0, f);
+esp_err_t avi_stream_add_frame(avi_stream_t *s, const uint8_t *jpeg,
+                               uint32_t len)
+{
+    if (!s->f) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s->frame_count >= s->frame_cap) {
+        size_t new_cap = s->frame_cap * 2;
+        uint32_t *grown = heap_caps_realloc(
+            s->frame_lens, new_cap * sizeof(uint32_t), MALLOC_CAP_SPIRAM);
+        if (!grown) {
+            ESP_LOGE(TAG, "Index growth failed at %u frames",
+                     (unsigned)s->frame_count);
+            return ESP_ERR_NO_MEM;
         }
+        s->frame_lens = grown;
+        s->frame_cap = new_cap;
+    }
+
+    long chunk_start = ftell(s->f);
+    put_tag(s->f, "00dc");
+    put_u32(s->f, len);
+    size_t written = fwrite(jpeg, 1, len, s->f);
+    if (len & 1) {
+        fputc(0, s->f);
+    }
+    if (written != len) {
+        ESP_LOGE(TAG, "Short frame write (%u of %u bytes)", (unsigned)written,
+                 (unsigned)len);
+        /* Roll back so finish writes the index where this frame began;
+         * the RIFF size then hides any trailing garbage from players.
+         * clearerr keeps the sticky error flag from failing the later
+         * finish, whose own writes are checked separately. */
+        if (chunk_start >= 0 && fseek(s->f, chunk_start, SEEK_SET) == 0) {
+            clearerr(s->f);
+        }
+        return ESP_FAIL;
+    }
+
+    s->frame_lens[s->frame_count] = len;
+    s->frame_count++;
+    s->movi_bytes += 8 + padded(len);
+    if (len > s->max_frame) {
+        s->max_frame = len;
+    }
+    return ESP_OK;
+}
+
+esp_err_t avi_stream_sync(avi_stream_t *s)
+{
+    if (!s->f) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (fflush(s->f) != 0 || fsync(fileno(s->f)) != 0) {
+        ESP_LOGE(TAG, "Video sync to card failed");
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
+esp_err_t avi_stream_finish(avi_stream_t *s, uint64_t duration_us)
+{
+    if (!s->f) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    FILE *f = s->f;
+    s->f = NULL;
+
+    if (s->frame_count == 0 || duration_us == 0) {
+        fclose(f);
+        heap_caps_free(s->frame_lens);
+        s->frame_lens = NULL;
+        ESP_LOGE(TAG, "No frames recorded");
+        return ESP_ERR_INVALID_ARG;
     }
 
     put_tag(f, "idx1");
-    put_u32(f, idx1_size);
+    put_u32(f, 16 * s->frame_count);
     uint32_t chunk_offset = 4; /* relative to the 'movi' type tag */
-    for (size_t i = 0; i < frame_count; i++) {
+    for (uint32_t i = 0; i < s->frame_count; i++) {
         put_tag(f, "00dc");
         put_u32(f, AVIIF_KEYFRAME);
         put_u32(f, chunk_offset);
-        put_u32(f, frames[i].len);
-        chunk_offset += 8 + padded(frames[i].len);
+        put_u32(f, s->frame_lens[i]);
+        chunk_offset += 8 + padded(s->frame_lens[i]);
     }
+    long end = ftell(f);
 
-    long total = ftell(f);
-    fclose(f);
+    uint32_t usec_per_frame = (uint32_t)(duration_us / s->frame_count);
+    uint32_t rate = s->frame_count * 1000u;
+    uint32_t scale = (uint32_t)(duration_us / 1000u);
+    uint32_t riff_size = (uint32_t)end - 8;
 
-    ESP_LOGI(TAG, "Wrote %s: %u frames, %ux%u, %.1f fps, %ld bytes", path,
-             (unsigned)frame_count, width, height,
-             1000000.0f * frame_count / duration_us, total);
-    return ESP_OK;
+    fseek(f, s->pos_riff_size, SEEK_SET);
+    put_u32(f, riff_size);
+
+    fseek(f, s->pos_avih, SEEK_SET);
+    put_u32(f, usec_per_frame);
+    put_u32(f, s->max_frame * 15); /* rough max bytes per second */
+    fseek(f, s->pos_avih + 16, SEEK_SET);
+    put_u32(f, s->frame_count);
+    fseek(f, s->pos_avih + 28, SEEK_SET);
+    put_u32(f, s->max_frame);
+
+    fseek(f, s->pos_strh + 20, SEEK_SET);
+    put_u32(f, scale);
+    put_u32(f, rate);
+    fseek(f, s->pos_strh + 32, SEEK_SET);
+    put_u32(f, s->frame_count);
+    put_u32(f, s->max_frame);
+
+    fseek(f, s->pos_movi_size, SEEK_SET);
+    put_u32(f, s->movi_bytes);
+
+    esp_err_t err = ferror(f) ? ESP_FAIL : ESP_OK;
+    if (fclose(f) != 0) {
+        err = ESP_FAIL;
+    }
+    heap_caps_free(s->frame_lens);
+    s->frame_lens = NULL;
+
+    ESP_LOGI(TAG, "Wrote %u frames, %ux%u, %.1f fps, %ld bytes",
+             (unsigned)s->frame_count, s->width, s->height,
+             1000000.0f * s->frame_count / duration_us, end);
+    return err;
 }

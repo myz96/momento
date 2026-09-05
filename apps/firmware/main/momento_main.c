@@ -7,16 +7,17 @@
  *   GPIO5/6 = I2C (DRV2605L haptics at 0x5A, scanned at boot)
  *
  * CAM press: one UXGA photo -> /sdcard/PHOTO_NNN.JPG
- * CAM hold (>= 1.5 s): toggle Wi-Fi sync mode (SoftAP + HTTP file
+ * CAM hold (>= 1.5 s): toggle Wi-Fi sync mode (AP+station + HTTP file
  *   server, LED blinks). Hold CAM again to leave sync mode.
  * REC press: start recording; press REC again to stop.
- *   Saves /sdcard/VID_NNN.AVI + AUD_NNN.WAV. Auto-stop at 30 s or
- *   when the PSRAM buffer is full (~10-12 s of a typical scene).
+ *   Streams /sdcard/VID_NNN.AVI + AUD_NNN.WAV straight to the card
+ *   (synced ~every 4 s). Auto-stop at 5 min or on an SD failure.
  */
 
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -63,36 +64,55 @@ static const char *TAG = "momento";
 #define PIN_I2C_SDA GPIO_NUM_5
 #define PIN_I2C_SCL GPIO_NUM_6
 
-#define MAX_RECORD_US     (30LL * 1000 * 1000)
+#define MAX_RECORD_US     (5LL * 60 * 1000 * 1000) /* recordings stream to SD */
 #define TARGET_FPS        15
 #define FRAME_INTERVAL_US (1000000 / TARGET_FPS)
-#define MAX_FRAMES        512
-#define VIDEO_BUF_BYTES   (5 * 1024 * 1024)
 
-#define AUDIO_MAX_BYTES (MIC_SAMPLE_RATE * 2 * 32) /* 32 seconds */
-#define AUDIO_GAIN      2
+#define AUDIO_CHUNK_BYTES 3200
+#define AUDIO_GAIN        2
+
+#define FLUSH_INTERVAL_US (4LL * 1000 * 1000) /* fsync cadence while recording */
 
 #define SYNC_HOLD_MS 1500 /* CAM held this long toggles sync mode */
 
 typedef struct {
-    uint8_t *buf;
-    size_t cap;
-    volatile size_t captured;
+    wav_stream_t *wav;
+    int16_t *chunk; /* AUDIO_CHUNK_BYTES, heap-allocated by the starter */
     volatile bool stop;
+    volatile bool failed;
     SemaphoreHandle_t done;
 } audio_job_t;
 
 static void audio_task(void *arg)
 {
     audio_job_t *job = arg;
-    while (!job->stop && job->captured < job->cap) {
-        size_t chunk = 3200;
-        if (chunk > job->cap - job->captured) {
-            chunk = job->cap - job->captured;
-        }
+    int16_t *chunk = job->chunk;
+    int chunks_since_flush = 0;
+    while (!job->stop) {
         size_t got = 0;
-        if (mic_read(job->buf + job->captured, chunk, &got, 200) == ESP_OK) {
-            job->captured += got;
+        if (mic_read((uint8_t *)chunk, AUDIO_CHUNK_BYTES, &got, 200) !=
+            ESP_OK) {
+            continue;
+        }
+        size_t samples = got / 2;
+        for (size_t i = 0; i < samples; i++) {
+            int32_t v = chunk[i] * AUDIO_GAIN;
+            if (v > INT16_MAX) v = INT16_MAX;
+            if (v < INT16_MIN) v = INT16_MIN;
+            chunk[i] = (int16_t)v;
+        }
+        if (wav_stream_write(job->wav, chunk, samples) != ESP_OK) {
+            job->failed = true;
+            break;
+        }
+        /* One chunk is ~100 ms of audio; sync about every 4 s so a power
+         * loss costs seconds, not the whole recording. */
+        if (++chunks_since_flush >= 40) {
+            chunks_since_flush = 0;
+            if (wav_stream_sync(job->wav) != ESP_OK) {
+                job->failed = true;
+                break;
+            }
         }
     }
     xSemaphoreGive(job->done);
@@ -241,62 +261,109 @@ static void take_photo(void)
     gpio_set_level(PIN_LED, 0);
 }
 
+/* Latched when an audio task is abandoned on a wedged card. The statics
+ * below stay owned by that zombie task, so no new recording may reuse
+ * them until a reboot. */
+static bool s_audio_wedged;
+
 static void record_clip(void)
 {
-    uint8_t *video_buf = heap_caps_malloc(VIDEO_BUF_BYTES, MALLOC_CAP_SPIRAM);
-    uint8_t *audio_buf = heap_caps_malloc(AUDIO_MAX_BYTES, MALLOC_CAP_SPIRAM);
-    static avi_frame_ref_t frames[MAX_FRAMES];
-    if (!video_buf || !audio_buf) {
-        ESP_LOGE(TAG, "PSRAM allocation failed");
-        heap_caps_free(video_buf);
-        heap_caps_free(audio_buf);
+    if (s_audio_wedged) {
+        ESP_LOGE(TAG, "Recording disabled after an SD wedge; power-cycle "
+                      "the device");
+        for (int i = 0; i < 5; i++) { /* fast error blink */
+            gpio_set_level(PIN_LED, 1);
+            vTaskDelay(pdMS_TO_TICKS(60));
+            gpio_set_level(PIN_LED, 0);
+            vTaskDelay(pdMS_TO_TICKS(60));
+        }
+        return;
+    }
+
+    /* One index covers both files; scan both patterns so a half-deleted
+     * pair can never overwrite the survivor. */
+    int idx_avi = next_index(SD_MOUNT_POINT "/VID_%03d.AVI");
+    int idx_wav = next_index(SD_MOUNT_POINT "/AUD_%03d.WAV");
+    int idx = idx_avi > idx_wav ? idx_avi : idx_wav;
+    char wav_path[64], avi_path[64];
+    snprintf(wav_path, sizeof(wav_path), SD_MOUNT_POINT "/AUD_%03d.WAV", idx);
+    snprintf(avi_path, sizeof(avi_path), SD_MOUNT_POINT "/VID_%03d.AVI", idx);
+
+    static wav_stream_t wav;
+    static avi_stream_t avi;
+    if (wav_stream_open(&wav, wav_path, MIC_SAMPLE_RATE) != ESP_OK) {
+        return;
+    }
+    if (avi_stream_open(&avi, avi_path, 640, 480) != ESP_OK) {
+        wav_stream_finish(&wav);
+        unlink(wav_path);
+        return;
+    }
+
+    static audio_job_t job;
+    memset(&job, 0, sizeof(job));
+    job.wav = &wav;
+    job.chunk = heap_caps_malloc(AUDIO_CHUNK_BYTES, MALLOC_CAP_SPIRAM);
+    job.done = xSemaphoreCreateBinary();
+    if (!job.chunk || !job.done ||
+        xTaskCreate(audio_task, "audio", 6144, &job, 5, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "Audio start failed, recording cancelled");
+        heap_caps_free(job.chunk);
+        if (job.done) {
+            vSemaphoreDelete(job.done);
+        }
+        wav_stream_finish(&wav);
+        avi_stream_finish(&avi, 1);
+        unlink(wav_path);
+        unlink(avi_path);
         return;
     }
 
     gpio_set_level(PIN_LED, 1);
-
-    audio_job_t job = {
-        .buf = audio_buf,
-        .cap = AUDIO_MAX_BYTES,
-        .done = xSemaphoreCreateBinary(),
-    };
     ESP_LOGI(TAG, "Recording... press REC again to stop (max %d s)",
              (int)(MAX_RECORD_US / 1000000));
-    xTaskCreate(audio_task, "audio", 4096, &job, 5, NULL);
 
     int64_t t0 = esp_timer_get_time();
     int64_t next_store = t0;
-    size_t used = 0;
-    size_t frame_count = 0;
+    int64_t next_flush = t0 + FLUSH_INTERVAL_US;
     int rec_high_streak = 0; /* REC must read released before a stop press counts */
     int rec_low_streak = 0;
-    bool stop_requested = false;
     const char *stop_reason = "time limit";
 
     while (esp_timer_get_time() - t0 < MAX_RECORD_US) {
         camera_fb_t *fb = esp_camera_fb_get();
-        if (!fb) {
-            continue;
-        }
         int64_t now = esp_timer_get_time();
-        if (now >= next_store) {
-            if (frame_count >= MAX_FRAMES ||
-                used + fb->len > VIDEO_BUF_BYTES) {
-                stop_reason = "buffer full";
-                esp_camera_fb_return(fb);
+        if (fb) {
+            if (now >= next_store) {
+                if (avi_stream_add_frame(&avi, fb->buf, fb->len) != ESP_OK) {
+                    stop_reason = "SD write failed";
+                    esp_camera_fb_return(fb);
+                    break;
+                }
+                next_store += FRAME_INTERVAL_US;
+                if (next_store < now) {
+                    next_store = now;
+                }
+            }
+            esp_camera_fb_return(fb);
+        } else {
+            /* Dead camera: keep the loop alive for the audio and the
+             * stop button, without a busy spin. */
+            vTaskDelay(pdMS_TO_TICKS(30));
+        }
+
+        if (fb && now >= next_flush) {
+            if (avi_stream_sync(&avi) != ESP_OK) {
+                stop_reason = "SD write failed";
                 break;
             }
-            memcpy(video_buf + used, fb->buf, fb->len);
-            frames[frame_count].offset = used;
-            frames[frame_count].len = fb->len;
-            used += fb->len;
-            frame_count++;
-            next_store += FRAME_INTERVAL_US;
-            if (next_store < now) {
-                next_store = now;
-            }
+            next_flush = now + FLUSH_INTERVAL_US;
         }
-        esp_camera_fb_return(fb);
+
+        if (job.failed) {
+            stop_reason = "SD write failed";
+            break;
+        }
 
         if (gpio_get_level(PIN_BTN_REC) == 1) {
             rec_high_streak++;
@@ -304,42 +371,50 @@ static void record_clip(void)
         } else if (rec_high_streak >= 3) {
             rec_low_streak++;
             if (rec_low_streak >= 2) {
-                stop_requested = true;
                 stop_reason = "REC pressed";
                 break;
             }
         }
     }
-    (void)stop_requested;
     int64_t duration_us = esp_timer_get_time() - t0;
 
+    /* Wait long: closing the file under a live fwrite corrupts memory,
+     * and FATFS can stall ~10 s on a worn card. 30 s means the card is
+     * truly wedged — then leak the audio resources deliberately instead
+     * of corrupting memory or hanging the device forever. */
     job.stop = true;
-    xSemaphoreTake(job.done, pdMS_TO_TICKS(1000));
-
-    size_t sample_count = job.captured / 2;
-    ESP_LOGI(TAG, "Stopped (%s): %u frames, %u audio samples, %.2f s",
-             stop_reason, (unsigned)frame_count, (unsigned)sample_count,
-             duration_us / 1000000.0f);
-
-    int16_t *samples = (int16_t *)audio_buf;
-    for (size_t i = 0; i < sample_count; i++) {
-        int32_t v = samples[i] * AUDIO_GAIN;
-        if (v > INT16_MAX) v = INT16_MAX;
-        if (v < INT16_MIN) v = INT16_MIN;
-        samples[i] = (int16_t)v;
+    if (xSemaphoreTake(job.done, pdMS_TO_TICKS(30000)) != pdTRUE) {
+        /* The zombie task still owns the static job and wav structs, so
+         * the latch blocks every later recording until a reboot. */
+        s_audio_wedged = true;
+        ESP_LOGE(TAG, "Audio task wedged on the SD card; recording is "
+                      "disabled until a power cycle.");
+        avi_stream_finish(&avi, (uint64_t)duration_us);
+        gpio_set_level(PIN_LED, 0);
+        return;
     }
 
-    int idx = next_index(SD_MOUNT_POINT "/VID_%03d.AVI");
-    char wav_path[64], avi_path[64];
-    snprintf(wav_path, sizeof(wav_path), SD_MOUNT_POINT "/AUD_%03d.WAV", idx);
-    snprintf(avi_path, sizeof(avi_path), SD_MOUNT_POINT "/VID_%03d.AVI", idx);
+    ESP_LOGI(TAG, "Stopped (%s): %u frames, %.2f s", stop_reason,
+             (unsigned)avi.frame_count, duration_us / 1000000.0f);
 
-    wav_write_file(wav_path, samples, sample_count, MIC_SAMPLE_RATE);
-    avi_write_mjpeg(avi_path, video_buf, frames, frame_count, 640, 480,
-                    (uint64_t)duration_us);
+    bool no_video = avi.frame_count == 0;
+    bool no_audio = wav.data_bytes == 0;
+    if (wav_stream_finish(&wav) != ESP_OK) {
+        ESP_LOGW(TAG, "WAV finalize incomplete: %s", wav_path);
+    }
+    if (avi_stream_finish(&avi, (uint64_t)duration_us) != ESP_OK &&
+        !no_video) {
+        ESP_LOGW(TAG, "AVI finalize incomplete: %s", avi_path);
+    }
+    /* A dead camera must not cost the audio: drop only the empty files. */
+    if (no_video) {
+        unlink(avi_path);
+    }
+    if (no_audio) {
+        unlink(wav_path);
+    }
 
-    heap_caps_free(video_buf);
-    heap_caps_free(audio_buf);
+    heap_caps_free(job.chunk);
     vSemaphoreDelete(job.done);
     gpio_set_level(PIN_LED, 0);
 }

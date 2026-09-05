@@ -15,8 +15,8 @@ ESP-IDF 6.1 firmware for the Seeed XIAO ESP32-S3 Sense board. Captures photos an
 
 | Function | GPIO |
 |----------|------|
-| CAM button | GPIO1 (active low) |
-| REC button | GPIO2 (active low) |
+| REC button | GPIO1 (active low) |
+| CAM button | GPIO2 (active low) |
 | Status LED | GPIO4 |
 | I2C SDA | GPIO5 |
 | I2C SCL | GPIO6 |
@@ -42,11 +42,12 @@ idf.py clean
 | Video | MJPEG AVI | `/sdcard/VID_NNN.AVI` | VGA (640×480) at 15 fps |
 | Audio | WAV | `/sdcard/AUD_NNN.WAV` | 16 kHz, 16-bit mono |
 
-Recording stops at 30 seconds or when PSRAM buffer fills (~10-12s typical).
+Recordings stream to the SD card and stop at 5 minutes, on a REC press,
+or on an SD write failure.
 
 ## Usage
 
-1. **CAM button (GPIO2)**: Press to capture a single UXGA photo
+1. **CAM button (GPIO2)**: Press to capture a single UXGA photo; hold 1.5 s to toggle Wi-Fi sync mode
 2. **REC button (GPIO1)**: Press to start recording; press again to stop
 
 LED indicates activity:
@@ -64,8 +65,10 @@ apps/firmware/
 │   ├── momento_main.c    # Entry point, button handling
 │   ├── sd_card.c/h       # SD card mount
 │   ├── mic.c/h           # I2S PDM microphone
-│   ├── avi_writer.c/h    # MJPEG AVI writer
-│   └── wav_writer.c/h    # WAV audio writer
+│   ├── avi_writer.c/h    # Streaming MJPEG AVI writer
+│   ├── wav_writer.c/h    # Streaming WAV audio writer
+│   ├── wifi_sync.c/h     # Sync mode: AP+station Wi-Fi + HTTP file server
+│   └── ble_prov.c/h      # BLE Wi-Fi credential provisioning
 ├── .devcontainer/        # Docker dev environment
 └── .vscode/              # VSCode ESP-IDF settings
 ```

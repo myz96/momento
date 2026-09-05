@@ -6,16 +6,16 @@
 
 /* Wi-Fi sync mode: HTTP file server over the SD card.
  *
- * Connection strategy:
- *   1. Station mode: join the home network with credentials stored in
- *      NVS (provisioned over BLE, see ble_prov.h). The device announces
- *      itself as momento.local via mDNS.
- *   2. Fallback SoftAP: no credentials, or the join fails. The phone
- *      joins WIFI_SYNC_SSID and talks to http://192.168.4.1.
+ * The radio runs AP and station together (APSTA). The SoftAP
+ * (WIFI_SYNC_SSID at http://192.168.4.1) is up for the whole session
+ * as the reliable fallback. The station keeps retrying the home
+ * network stored in NVS (provisioned over BLE, see ble_prov.h); once
+ * joined, the device is momento.local via mDNS and SNTP sets the
+ * clock, which makes capture timestamps real.
  *
  * HTTP endpoints (see packages/device-protocol/README.md):
  *   GET    /api/info          device + storage summary
- *   GET    /api/files         JSON list of media files
+ *   GET    /api/files         JSON list of media files (name, size, mtime)
  *   GET    /api/files/NAME    file download
  *   DELETE /api/files/NAME    remove a file after the app stored it
  */
@@ -24,13 +24,12 @@
 #define WIFI_SYNC_PASSWORD "momento123"
 
 typedef enum {
-    WIFI_SYNC_OFF,        /* sync mode not running */
-    WIFI_SYNC_CONNECTING, /* station join in progress */
-    WIFI_SYNC_STA,        /* on the home network */
-    WIFI_SYNC_AP,         /* fallback SoftAP */
+    WIFI_SYNC_OFF, /* sync mode not running */
+    WIFI_SYNC_STA, /* on the home network (the SoftAP also stays up) */
+    WIFI_SYNC_AP,  /* SoftAP only; the station keeps retrying */
 } wifi_sync_state_t;
 
-/* Starts Wi-Fi (station first, SoftAP fallback) and the HTTP server. */
+/* Starts the AP+station radio and the HTTP server. */
 esp_err_t wifi_sync_start(void);
 
 /* Stops the HTTP server, mDNS, and Wi-Fi. */

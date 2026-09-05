@@ -15,8 +15,8 @@ ESP-IDF 6.1 firmware for the Seeed XIAO ESP32-S3 Sense board mounted on the back
 
 | Function | GPIO |
 |----------|------|
-| CAM button | GPIO1 (active low) |
-| REC button | GPIO2 (active low) |
+| REC button | GPIO1 (active low) |
+| CAM button | GPIO2 (active low) |
 | Status LED | GPIO4 |
 | I2C SDA | GPIO5 |
 | I2C SCL | GPIO6 |
@@ -29,24 +29,23 @@ The device is operated one-handed, often without looking at it.
 
 | Button | Action | Haptic Pattern | Result |
 |--------|--------|----------------|--------|
-| **Shutter button** (GPIO1) | Single click | Short pulse | Capture one photo (JPEG) |
-| **Shutter button** (GPIO1) | Hold 1.5 s | — | Toggle Wi-Fi sync mode (LED blinks) |
-| **Audio button** (GPIO2) | Single click | Double pulse | Toggle start/stop audio recording (WAV) |
+| **CAM button** (GPIO2) | Single click | Short pulse | Capture one photo (JPEG) |
+| **CAM button** (GPIO2) | Hold 1.5 s | — | Toggle Wi-Fi sync mode (LED blinks) |
+| **REC button** (GPIO1) | Single click | Double pulse | Start/stop a recording (MJPEG AVI clip + WAV audio) |
 
-The haptic feedback is intentionally different between buttons so the user knows which one they pressed without looking.
-
-> Video recording is not currently implemented.
+The haptic feedback is intentionally different between buttons so the user knows which one they pressed without looking. (Haptics are wired up in hardware but not driven by the firmware yet.)
 
 ## Wi-Fi Sync Mode
 
 Hold the shutter button for 1.5 s to toggle sync mode. The status LED
-blinks while sync mode is on. The device serves the HTTP file API and
-picks a network in this order:
+blinks while sync mode is on. The device serves the HTTP file API with
+the radio in AP+station mode — both live at the same time:
 
-1. Station mode: joins the home network with NVS credentials, reachable
-   as `momento.local` (mDNS).
-2. SoftAP fallback: SSID `Momento`, password `momento123`, at
-   `http://192.168.4.1`.
+1. SoftAP: SSID `Momento`, password `momento123`, at
+   `http://192.168.4.1`, up for the whole session.
+2. Station: keeps retrying the home network (NVS credentials) until the
+   join lands; then also `momento.local` (mDNS), and SNTP sets the clock
+   so file timestamps become real capture times.
 
 In sync mode the device also advertises over BLE as `Momento`
 (`main/ble_prov.c`, NimBLE). The app sends the home Wi-Fi credentials
@@ -109,7 +108,9 @@ See `main/idf_component.yml` and `dependencies.lock`.
 | Video | MJPEG AVI | `/sdcard/VID_NNN.AVI` | VGA (640×480) at 15 fps |
 | Audio | WAV | `/sdcard/AUD_NNN.WAV` | 16 kHz, 16-bit mono |
 
-Recording stops at 30 seconds or when PSRAM buffer fills (~10-12s typical).
+Recordings stream to the SD card (no PSRAM buffering) and stop at 5
+minutes, on a REC press, or on an SD write failure. Both files sync to
+the card about every 4 s, so a power loss costs seconds, not the clip.
 
 ## C Coding Conventions
 
