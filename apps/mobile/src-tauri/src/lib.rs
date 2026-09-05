@@ -335,8 +335,17 @@ async fn backup_to_cloud(
     app: AppHandle,
     backend: Option<String>,
     free_space: bool,
+    api_key: Option<String>,
     on_progress: Channel<SyncProgress>,
 ) -> Result<BackupReport, String> {
+    let api_key = api_key.unwrap_or_default();
+    let with_key = |req: reqwest::RequestBuilder| {
+        if api_key.is_empty() {
+            req
+        } else {
+            req.bearer_auth(&api_key)
+        }
+    };
     let _guard = STORE_LOCK.lock().await;
     let backend = {
         let b = backend.unwrap_or_default();
@@ -349,8 +358,7 @@ async fn backup_to_cloud(
     };
     let client = http_client()?;
 
-    let existing: Vec<CloudFile> = client
-        .get(format!("{backend}/media"))
+    let existing: Vec<CloudFile> = with_key(client.get(format!("{backend}/media")))
         .send()
         .await
         .map_err(|e| format!("Backend not reachable: {e}"))?
@@ -383,8 +391,7 @@ async fn backup_to_cloud(
         let bytes = fs::read(&f.path).map_err(err_str)?;
         let part = reqwest::multipart::Part::bytes(bytes).file_name(f.name.clone());
         let form = reqwest::multipart::Form::new().part("file", part);
-        client
-            .post(format!("{backend}/media"))
+        with_key(client.post(format!("{backend}/media")))
             .multipart(form)
             .send()
             .await
@@ -399,8 +406,7 @@ async fn backup_to_cloud(
     if free_space {
         // Re-read the cloud list so every local file is verified against
         // the byte count the backend actually stored.
-        let verified: Vec<CloudFile> = client
-            .get(format!("{backend}/media"))
+        let verified: Vec<CloudFile> = with_key(client.get(format!("{backend}/media")))
             .send()
             .await
             .map_err(err_str)?

@@ -99,6 +99,7 @@ function App() {
   const [cloudBusy, setCloudBusy] = useState(false);
   const [freeSpaceStr, setFreeSpaceStr] = usePersistedState("freeSpace", "on");
   const [autoBackupStr, setAutoBackupStr] = usePersistedState("autoBackup", "on");
+  const [cloudKey, setCloudKey] = usePersistedState("cloudKey", "");
   const freeSpace = freeSpaceStr === "on";
   const autoBackup = autoBackupStr === "on";
 
@@ -203,6 +204,7 @@ function App() {
         const report = await invoke<BackupReport>("backup_to_cloud", {
           backend: backendUrl,
           freeSpace,
+          apiKey: cloudKey,
           onProgress,
         });
         const parts = [
@@ -237,7 +239,7 @@ function App() {
         setCloudBusy(false);
       }
     },
-    [backendUrl, freeSpace, refreshMedia],
+    [backendUrl, freeSpace, cloudKey, refreshMedia],
   );
 
   // The ref pattern keeps the timers stable: typing in the URL field must
@@ -330,6 +332,13 @@ function App() {
             placeholder="http://localhost:8000"
             disabled={cloudBusy}
           />
+          <input
+            type="password"
+            value={cloudKey}
+            onChange={(e) => setCloudKey(e.currentTarget.value)}
+            placeholder="API key (empty for local)"
+            disabled={cloudBusy}
+          />
           <button
             className="primary"
             onClick={() => backupToCloud(false)}
@@ -374,7 +383,9 @@ function App() {
                 {files.map((m) => {
                   const inCloud = m.location === "cloud";
                   const src = inCloud
-                    ? `${backendUrl}/media/${m.name}`
+                    ? `${backendUrl}/media/${m.name}${
+                        cloudKey ? `?key=${encodeURIComponent(cloudKey)}` : ""
+                      }`
                     : convertFileSrc(m.path);
                   const thumbSrc = inCloud && m.thumb ? convertFileSrc(m.thumb) : src;
                   return (

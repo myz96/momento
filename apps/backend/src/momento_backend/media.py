@@ -6,13 +6,16 @@ disk by default, Cloudflare R2 when the MOMENTO_R2_* variables are set.
 
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
+from momento_backend.auth import require_key
 from momento_backend.storage import MediaStorage, storage_from_env
 
-router = APIRouter(prefix="/media", tags=["media"])
+router = APIRouter(
+    prefix="/media", tags=["media"], dependencies=[Depends(require_key)]
+)
 
 ALLOWED_SUFFIXES = {".jpg", ".jpeg", ".wav", ".avi"}
 
