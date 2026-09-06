@@ -266,7 +266,10 @@ static void take_photo(void)
  * them until a reboot. */
 static bool s_audio_wedged;
 
-static void record_clip(void)
+/* Records one clip pair (VID+AUD). Returns true only for a clean
+ * time-limit stop with content on disk — the caller then rolls straight
+ * into the next clip, so one REC press records until the next press. */
+static bool record_clip(void)
 {
     if (s_audio_wedged) {
         ESP_LOGE(TAG, "Recording disabled after an SD wedge; power-cycle "
@@ -277,7 +280,7 @@ static void record_clip(void)
             gpio_set_level(PIN_LED, 0);
             vTaskDelay(pdMS_TO_TICKS(60));
         }
-        return;
+        return false;
     }
 
     /* One index covers both files; scan both patterns so a half-deleted
@@ -292,12 +295,12 @@ static void record_clip(void)
     static wav_stream_t wav;
     static avi_stream_t avi;
     if (wav_stream_open(&wav, wav_path, MIC_SAMPLE_RATE) != ESP_OK) {
-        return;
+        return false;
     }
     if (avi_stream_open(&avi, avi_path, 640, 480) != ESP_OK) {
         wav_stream_finish(&wav);
         unlink(wav_path);
-        return;
+        return false;
     }
 
     static audio_job_t job;
@@ -316,7 +319,7 @@ static void record_clip(void)
         avi_stream_finish(&avi, 1);
         unlink(wav_path);
         unlink(avi_path);
-        return;
+        return false;
     }
 
     gpio_set_level(PIN_LED, 1);
@@ -391,7 +394,7 @@ static void record_clip(void)
                       "disabled until a power cycle.");
         avi_stream_finish(&avi, (uint64_t)duration_us);
         gpio_set_level(PIN_LED, 0);
-        return;
+        return false;
     }
 
     ESP_LOGI(TAG, "Stopped (%s): %u frames, %.2f s", stop_reason,
@@ -417,6 +420,9 @@ static void record_clip(void)
     heap_caps_free(job.chunk);
     vSemaphoreDelete(job.done);
     gpio_set_level(PIN_LED, 0);
+    /* A clean cap stop with nothing on disk (dead camera AND dead mic)
+     * must not loop forever producing empty pairs. */
+    return strcmp(stop_reason, "time limit") == 0 && !(no_video && no_audio);
 }
 
 static bool button_pressed(gpio_num_t pin)
@@ -548,7 +554,9 @@ void app_main(void)
         } else if (button_pressed(PIN_BTN_REC)) {
             ESP_LOGI(TAG, "REC button pressed, recording starts");
             wait_release(PIN_BTN_REC);
-            record_clip();
+            while (record_clip()) {
+                ESP_LOGI(TAG, "Clip cap reached; rolling into a new clip");
+            }
             wait_release(PIN_BTN_REC);
         }
         vTaskDelay(pdMS_TO_TICKS(20));
