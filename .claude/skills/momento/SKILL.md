@@ -30,7 +30,8 @@ uv run --project apps/backend momento <command>
    - Voice memo: `momento transcript AUD_012.WAV` prints the text.
    - Clip: `momento frames VID_012.AVI` prints paths of frames sampled
      every 4 s (cap 8). Read them in order — they tell the story.
-     `momento transcript VID_012.AVI` adds the clip's audio.
+     `momento transcript VID_012.AVI` adds the clip's audio (the
+     backend resolves the paired AUD file for you).
 4. **Write a note for anything you inspected.** This is the important
    step: notes make the next search instant and free. Do it even when
    the file was not the answer.
@@ -48,7 +49,7 @@ uv run --project apps/backend momento <command>
 
 | Command | Does |
 |---|---|
-| `momento ls [--day D] [--kind photo\|audio\|clip] [--json]` | timeline with capture times and `[note,transcript]` flags |
+| `momento ls [--day D] [--kind photo\|audio\|clip] [--json]` | timeline with capture times and `[note,transcript]` flags; `--day` means the home-timezone day |
 | `momento search <words>` | all words must match; sources: name, note, transcript |
 | `momento get NAME` | download, print local path |
 | `momento frames NAME [--every S] [--max N]` | sample clip frames, print local paths |

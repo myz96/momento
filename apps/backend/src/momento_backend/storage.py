@@ -80,15 +80,14 @@ class DiskStorage:
         return size
 
     def list(self) -> list[StoredFile]:
-        entries = [
-            StoredFile(
-                name=p.name,
-                size=p.stat().st_size,
-                mtime=int(p.stat().st_mtime),
+        entries = []
+        for p in self._dir().iterdir():
+            if not p.is_file() or p.suffix.lower() not in self.allowed_suffixes:
+                continue
+            st = p.stat()
+            entries.append(
+                StoredFile(name=p.name, size=st.st_size, mtime=int(st.st_mtime))
             )
-            for p in self._dir().iterdir()
-            if p.is_file() and p.suffix.lower() in self.allowed_suffixes
-        ]
         entries.sort(key=lambda e: e.name)
         return entries
 
@@ -154,6 +153,13 @@ class DiskStorage:
         return keys
 
 
+def _is_missing(error) -> bool:
+    """True for a not-found ClientError; config and permission failures
+    must surface, not read as an absent file."""
+    code = error.response.get("Error", {}).get("Code", "")
+    return code in ("404", "NoSuchKey", "NotFound")
+
+
 class R2Storage:
     def __init__(
         self,
@@ -161,10 +167,12 @@ class R2Storage:
         access_key_id: str,
         secret_access_key: str,
         bucket: str,
+        allowed_suffixes: set[str],
     ):
         import boto3
 
         self.bucket = bucket
+        self.allowed_suffixes = allowed_suffixes
         self.client = boto3.client(
             "s3",
             endpoint_url=f"https://{account_id}.r2.cloudflarestorage.com",
@@ -173,6 +181,11 @@ class R2Storage:
             region_name="auto",
         )
 
+    def _objects(self, **kwargs):
+        paginator = self.client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=self.bucket, **kwargs):
+            yield from page.get("Contents", [])
+
     def save(self, name: str, src: BinaryIO) -> int:
         self.client.upload_fileobj(src, self.bucket, name)
         head = self.client.head_object(Bucket=self.bucket, Key=name)
@@ -180,20 +193,20 @@ class R2Storage:
 
     def list(self) -> list[StoredFile]:
         entries: list[StoredFile] = []
-        paginator = self.client.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=self.bucket):
-            for obj in page.get("Contents", []):
-                # Media files sit at the bucket root; anything with a "/"
-                # is derived data under _meta/ and never a media file.
-                if "/" in obj["Key"]:
-                    continue
-                entries.append(
-                    StoredFile(
-                        name=obj["Key"],
-                        size=obj["Size"],
-                        mtime=int(obj["LastModified"].timestamp()),
-                    )
+        for obj in self._objects():
+            # Media files sit at the bucket root; anything with a "/"
+            # is derived data under _meta/ and never a media file.
+            if "/" in obj["Key"]:
+                continue
+            if Path(obj["Key"]).suffix.lower() not in self.allowed_suffixes:
+                continue
+            entries.append(
+                StoredFile(
+                    name=obj["Key"],
+                    size=obj["Size"],
+                    mtime=int(obj["LastModified"].timestamp()),
                 )
+            )
         entries.sort(key=lambda e: e.name)
         return entries
 
@@ -201,8 +214,10 @@ class R2Storage:
         try:
             head = self.client.head_object(Bucket=self.bucket, Key=name)
             return head["ContentLength"]
-        except self.client.exceptions.ClientError:
-            return None
+        except self.client.exceptions.ClientError as e:
+            if _is_missing(e):
+                return None
+            raise
 
     def stream(
         self, name: str, start: int = 0, end: int | None = None
@@ -220,8 +235,10 @@ class R2Storage:
                 Bucket=self.bucket, Key=_check_meta_key(key)
             )["Body"]
             return body.read()
-        except self.client.exceptions.ClientError:
-            return None
+        except self.client.exceptions.ClientError as e:
+            if _is_missing(e):
+                return None
+            raise
 
     def write_meta(self, key: str, data: bytes) -> None:
         self.client.put_object(
@@ -232,21 +249,17 @@ class R2Storage:
         key = _check_meta_key(key)
         try:
             self.client.head_object(Bucket=self.bucket, Key=key)
-        except self.client.exceptions.ClientError:
-            return False
+        except self.client.exceptions.ClientError as e:
+            if _is_missing(e):
+                return False
+            raise
         self.client.delete_object(Bucket=self.bucket, Key=key)
         return True
 
     def list_meta(self, prefix: str) -> "list[str]":
-        keys: list[str] = []
-        paginator = self.client.get_paginator("list_objects_v2")
-        for page in paginator.paginate(
-            Bucket=self.bucket, Prefix=_check_meta_key(prefix)
-        ):
-            for obj in page.get("Contents", []):
-                keys.append(obj["Key"])
-        keys.sort()
-        return keys
+        return sorted(
+            obj["Key"] for obj in self._objects(Prefix=_check_meta_key(prefix))
+        )
 
 
 def storage_from_env(allowed_suffixes: set[str]) -> MediaStorage:
@@ -255,6 +268,6 @@ def storage_from_env(allowed_suffixes: set[str]) -> MediaStorage:
     secret = os.environ.get("MOMENTO_R2_SECRET_ACCESS_KEY")
     bucket = os.environ.get("MOMENTO_R2_BUCKET")
     if account_id and access_key and secret and bucket:
-        return R2Storage(account_id, access_key, secret, bucket)
+        return R2Storage(account_id, access_key, secret, bucket, allowed_suffixes)
     root = Path(os.environ.get("MOMENTO_MEDIA_DIR", "data/media"))
     return DiskStorage(root, allowed_suffixes)

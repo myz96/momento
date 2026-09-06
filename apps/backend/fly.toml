@@ -3,6 +3,10 @@
 app = "momento-backend"
 primary_region = "syd"
 
+# Days group in the household timezone on every client (CLI and MCP).
+[env]
+  MOMENTO_TZ = "Australia/Sydney"
+
 [http_service]
   internal_port = 8000
   force_https = true

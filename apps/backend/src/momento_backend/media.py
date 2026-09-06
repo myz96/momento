@@ -6,19 +6,19 @@ disk by default, Cloudflare R2 when the MOMENTO_R2_* variables are set.
 
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Form, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from momento_backend import meta, transcribe
-from momento_backend.auth import require_key
 from momento_backend.storage import MediaStorage, storage_from_env
 
-router = APIRouter(
-    prefix="/media", tags=["media"], dependencies=[Depends(require_key)]
-)
+# Auth lives in one place: the KeyGate wrapper around the whole app
+# (see auth.py and main.py), so routers carry no per-route dependency.
+router = APIRouter(prefix="/media", tags=["media"])
 
-ALLOWED_SUFFIXES = {".jpg", ".jpeg", ".wav", ".avi"}
+KINDS = {".jpg": "photo", ".jpeg": "photo", ".wav": "audio", ".avi": "clip"}
+ALLOWED_SUFFIXES = set(KINDS)
 
 CONTENT_TYPES = {
     ".jpg": "image/jpeg",
@@ -44,6 +44,13 @@ def safe_name(name: str) -> str:
     ):
         raise HTTPException(status_code=400, detail=f"Invalid file name: {name!r}")
     return name
+
+
+def require_file(storage: MediaStorage, name: str) -> int:
+    size = storage.size(name)
+    if size is None:
+        raise HTTPException(status_code=404, detail=f"No such file: {name}")
+    return size
 
 
 @router.post("", status_code=201)
@@ -102,9 +109,7 @@ def parse_range(header: str, size: int) -> tuple[int, int] | None:
 async def download_media(name: str, request: Request) -> StreamingResponse:
     name = safe_name(name)
     storage = get_storage()
-    size = await run_in_threadpool(storage.size, name)
-    if size is None:
-        raise HTTPException(status_code=404, detail=f"No such file: {name}")
+    size = await run_in_threadpool(require_file, storage, name)
     media_type = CONTENT_TYPES.get(
         Path(name).suffix.lower(), "application/octet-stream"
     )

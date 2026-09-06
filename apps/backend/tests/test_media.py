@@ -1,15 +1,5 @@
 import pytest
-from httpx import ASGITransport, AsyncClient
-
-from momento_backend.main import app
-
-
-@pytest.fixture
-async def client(tmp_path, monkeypatch) -> AsyncClient:
-    monkeypatch.setenv("MOMENTO_MEDIA_DIR", str(tmp_path / "media"))
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        yield ac
+from httpx import AsyncClient
 
 
 @pytest.mark.asyncio

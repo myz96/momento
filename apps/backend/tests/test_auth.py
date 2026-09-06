@@ -63,3 +63,19 @@ async def test_download_accepts_query_key(client: AsyncClient) -> None:
 @pytest.mark.asyncio
 async def test_health_stays_open(client: AsyncClient) -> None:
     assert (await client.get("/health")).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_non_ascii_key_is_401_not_500(client: AsyncClient) -> None:
+    # compare_digest raises TypeError on non-ASCII str; a garbage key
+    # must read as wrong, not crash the request.
+    assert (await client.get("/media?key=k%C3%A9")).status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_new_routes_fail_closed(client: AsyncClient) -> None:
+    # The gate wraps the whole app, so /mcp and the catalog routes are
+    # closed without a key.
+    assert (await client.post("/mcp", json={})).status_code == 401
+    assert (await client.get("/catalog")).status_code == 401
+    assert (await client.get("/search?q=x")).status_code == 401

@@ -1,40 +1,11 @@
 """Tests for the AI layer: transcripts, frames, notes, and search."""
 
 import asyncio
-import struct
 
 import pytest
-from httpx import ASGITransport, AsyncClient
-
-from momento_backend.main import app
-
-FAKE_TEXT = "fake transcript about the battery"
-
-
-@pytest.fixture
-async def env(tmp_path, monkeypatch):
-    media_dir = tmp_path / "media"
-    monkeypatch.setenv("MOMENTO_MEDIA_DIR", str(media_dir))
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        yield ac, media_dir
-
-
-def tiny_jpeg(tag: int) -> bytes:
-    return b"\xff\xd8" + bytes([tag]) * 10 + b"\xff\xd9"
-
-
-def synthetic_avi(n_frames: int, us_per_frame: int = 66_666) -> bytes:
-    buf = b"RIFF\x00\x00\x00\x00AVI "
-    buf += b"avih" + struct.pack("<I", 56) + struct.pack("<I", us_per_frame)
-    buf += b"\x00" * 52
-    for i in range(n_frames):
-        jpg = tiny_jpeg(i % 250)
-        buf += b"00dc" + struct.pack("<I", len(jpg)) + jpg
-    # A fake idx1 entry: a 00dc id whose "payload" is not a JPEG. The
-    # scanner must skip it instead of counting a bogus frame.
-    buf += b"idx100dc" + struct.pack("<I", 16) + b"\x10\x00\x00\x00" * 4
-    return buf
+from conftest import FAKE_TRANSCRIPT_TEXT as FAKE_TEXT
+from conftest import synthetic_avi, tiny_jpeg
+from httpx import AsyncClient
 
 
 async def wait_for_transcript(client: AsyncClient, name: str, tries: int = 50):
@@ -81,6 +52,7 @@ async def test_upload_triggers_eager_transcription(env) -> None:
     record = await wait_for_transcript(client, "AUD_001.WAV")
     assert record["text"] == FAKE_TEXT
     assert record["name"] == "AUD_001.WAV"
+    assert record["size"] == 5
 
 
 async def test_transcript_request_queues_missing_file(env) -> None:
@@ -93,21 +65,47 @@ async def test_transcript_request_queues_missing_file(env) -> None:
     assert record["text"] == FAKE_TEXT
 
 
-async def test_transcript_rejects_non_audio_and_missing(env) -> None:
+async def test_transcript_goes_stale_when_the_file_changes(env) -> None:
+    client, _ = env
+    await client.post("/media", files={"file": ("AUD_009.WAV", b"RIFFa", "audio/wav")})
+    first = await wait_for_transcript(client, "AUD_009.WAV")
+    assert first["size"] == 5
+    # A healed or replaced upload has different bytes; the old words
+    # must not survive it.
+    await client.post(
+        "/media", files={"file": ("AUD_009.WAV", b"RIFFlonger", "audio/wav")}
+    )
+    record = await wait_for_transcript(client, "AUD_009.WAV")
+    assert record["size"] == 10
+
+
+async def test_transcript_of_a_clip_resolves_the_paired_audio(env) -> None:
+    client, _ = env
+    for name, payload in [
+        ("900_AUD_001.WAV", b"RIFFold"),
+        ("5000_AUD_001.WAV", b"RIFFnew"),
+        ("1000_VID_001.AVI", synthetic_avi(5)),
+    ]:
+        await client.post("/media", files={"file": (name, payload, "x")})
+    record = await wait_for_transcript(client, "1000_VID_001.AVI")
+    # The pair is the audio file whose epoch prefix sits closest.
+    assert record["name"] == "900_AUD_001.WAV"
+
+
+async def test_transcript_rejects_non_media_and_missing(env) -> None:
     client, _ = env
     assert (await client.get("/media/PHOTO_001.JPG/transcript")).status_code == 400
     assert (await client.get("/media/AUD_404.WAV/transcript")).status_code == 404
 
 
-async def test_backfill_reports_queued_and_done(env) -> None:
+async def test_backfill_reports_queued_done_and_in_progress(env) -> None:
     client, media_dir = env
     await client.post("/media", files={"file": ("AUD_003.WAV", b"RIFFa", "audio/wav")})
     await wait_for_transcript(client, "AUD_003.WAV")
     (media_dir / "AUD_004.WAV").write_bytes(b"RIFFb")
-    response = await client.post("/transcripts/backfill")
-    counts = response.json()
+    counts = (await client.post("/transcripts/backfill")).json()
     assert counts["done"] == 1
-    assert counts["queued"] == 1
+    assert counts["queued"] + counts["in_progress"] == 1
     await wait_for_transcript(client, "AUD_004.WAV")
 
 
@@ -154,6 +152,20 @@ async def test_frames_cap_of_one_returns_the_first_frame(env) -> None:
     assert [f["t"] for f in response.json()["frames"]] == [0.0]
 
 
+async def test_frames_go_stale_when_the_file_changes(env) -> None:
+    client, _ = env
+    await client.post(
+        "/media", files={"file": ("VID_004.AVI", synthetic_avi(45), "video/x-msvideo")}
+    )
+    first = (await client.get("/media/VID_004.AVI/frames")).json()
+    assert first["total_frames"] == 45
+    await client.post(
+        "/media", files={"file": ("VID_004.AVI", synthetic_avi(90), "video/x-msvideo")}
+    )
+    second = (await client.get("/media/VID_004.AVI/frames")).json()
+    assert second["total_frames"] == 90
+
+
 async def test_frames_reject_non_video(env) -> None:
     client, _ = env
     await client.post("/media", files={"file": ("AUD_005.WAV", b"RIFFc", "audio/wav")})
@@ -182,15 +194,41 @@ async def test_note_lifecycle_and_catalog_join(env) -> None:
 
     record = (await client.get("/catalog/AUD_010.WAV")).json()
     assert record["transcript"] == FAKE_TEXT
+    assert isinstance(record["mtime"], int)  # upload-time fallback applies here too
 
     assert (await client.delete("/catalog/PHOTO_010.JPG")).status_code == 200
     assert (await client.delete("/catalog/PHOTO_010.JPG")).status_code == 404
 
 
-async def test_note_requires_existing_file(env) -> None:
+async def test_note_requires_existing_file_and_content(env) -> None:
     client, _ = env
-    response = await client.put("/catalog/PHOTO_404.JPG", json={"note": "ghost"})
-    assert response.status_code == 404
+    assert (
+        await client.put("/catalog/PHOTO_404.JPG", json={"note": "ghost"})
+    ).status_code == 404
+    await client.post("/media", files={"file": ("PHOTO_011.JPG", b"x", "image/jpeg")})
+    assert (
+        await client.put("/catalog/PHOTO_011.JPG", json={"note": "   "})
+    ).status_code == 400
+
+
+async def test_catalog_filters_by_day_and_kind_and_sorts_by_time(env) -> None:
+    client, _ = env
+    await client.post(
+        "/media",
+        files={"file": ("PHOTO_020.JPG", b"x", "image/jpeg")},
+        data={"mtime": "1757000000"},  # 2025-09-04 UTC
+    )
+    await client.post(
+        "/media",
+        files={"file": ("PHOTO_019.JPG", b"x", "image/jpeg")},
+        data={"mtime": "1757100000"},  # 2025-09-05 UTC
+    )
+    all_records = (await client.get("/catalog")).json()
+    assert [r["name"] for r in all_records] == ["PHOTO_020.JPG", "PHOTO_019.JPG"]
+    day = (await client.get("/catalog", params={"day": "2025-09-04"})).json()
+    assert [r["name"] for r in day] == ["PHOTO_020.JPG"]
+    none = (await client.get("/catalog", params={"kind": "clip"})).json()
+    assert none == []
 
 
 async def test_search_covers_names_notes_and_transcripts(env) -> None:

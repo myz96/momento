@@ -2,84 +2,226 @@
 
 These routes turn stored media into text an agent can work with. The
 split of labor: this backend does mechanical extraction (audio → text,
-bytes → frames) and stores knowledge (notes); the reading agent does the
-understanding and writes down what it learned. See the momento CLI and
-the .claude/skills/momento skill for the client side.
+bytes → frames) and stores knowledge (notes); the reading agent does
+the understanding and writes down what it learned.
+
+The module has two halves: a service layer of public functions that
+take (storage, plain params) and raise ValueError — shared by the HTTP
+routes below and the MCP tools in mcp_server.py — and the routes
+themselves, which stay thin.
 """
 
 import datetime
+import re
 import tempfile
+import threading
+import zoneinfo
+from concurrent.futures import ThreadPoolExecutor
+from os import environ
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 from momento_backend import avi_frames, meta, transcribe
-from momento_backend.auth import require_key
-from momento_backend.media import get_storage, safe_name
+from momento_backend.media import KINDS, get_storage, require_file, safe_name
 from momento_backend.storage import MediaStorage
 
-router = APIRouter(tags=["catalog"], dependencies=[Depends(require_key)])
+router = APIRouter(tags=["catalog"])
 
-KINDS = {".jpg": "photo", ".jpeg": "photo", ".wav": "audio", ".avi": "clip"}
+MAX_NOTE_CHARS = 20_000
+
+# Meta objects are small and independent; reading them one by one costs
+# an R2 round trip each, so list and search fetch them concurrently.
+_reader_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="meta-read")
+
+# One extraction per clip at a time, so overlapping requests with
+# different parameters cannot interleave frame writes with the index.
+_frame_locks: dict[str, threading.Lock] = {}
+_frame_locks_guard = threading.Lock()
 
 
 def kind_of(name: str) -> str:
     return KINDS.get(Path(name).suffix.lower(), "unknown")
 
 
-def _require_file(storage: MediaStorage, name: str) -> int:
+def home_tz() -> datetime.tzinfo:
+    """Days group in the household timezone (MOMENTO_TZ), not UTC, so
+    "what did I do Saturday" means Michael's Saturday on every client."""
+    name = environ.get("MOMENTO_TZ", "UTC")
+    try:
+        return zoneinfo.ZoneInfo(name)
+    except (zoneinfo.ZoneInfoNotFoundError, ValueError):
+        return datetime.UTC
+
+
+def day_of(mtime: int | None) -> str | None:
+    if not mtime:
+        return None
+    local = datetime.datetime.fromtimestamp(mtime, tz=home_tz())
+    return local.strftime("%Y-%m-%d")
+
+
+def captured_iso(mtime: int | None) -> str | None:
+    if not mtime:
+        return None
+    local = datetime.datetime.fromtimestamp(mtime, tz=home_tz())
+    return local.isoformat(timespec="minutes")
+
+
+def _read_field(storage: MediaStorage, key: str, field: str) -> str | None:
+    doc = meta.read_json(storage, key)
+    return doc.get(field) if doc else None
+
+
+def build_catalog(
+    storage: MediaStorage, day: str | None = None, kind: str | None = None
+) -> list[dict]:
+    entries = storage.list()
+    mtimes = meta.load_mtimes(storage)
+    noted = set(storage.list_meta(meta.NOTES_PREFIX))
+    transcribed = set(storage.list_meta(meta.TRANSCRIPTS_PREFIX))
+    framed = set(storage.list_meta(meta.FRAMES_PREFIX))
+    records = []
+    for e in entries:
+        # The recorded capture time wins; the storage timestamp (upload
+        # time) is the fallback for files uploaded before mtime support.
+        mtime = mtimes.get(e.name, e.mtime)
+        record = {
+            "name": e.name,
+            "kind": kind_of(e.name),
+            "size": e.size,
+            "mtime": mtime,
+            "captured": captured_iso(mtime),
+            "note": None,
+            "has_transcript": meta.transcript_key(e.name) in transcribed,
+            "has_frames": meta.frames_index_key(e.name) in framed,
+        }
+        if kind and record["kind"] != kind:
+            continue
+        if day and day_of(mtime) != day:
+            continue
+        records.append(record)
+    with_notes = [r for r in records if meta.note_key(r["name"]) in noted]
+    futures = {
+        r["name"]: _reader_pool.submit(
+            _read_field, storage, meta.note_key(r["name"]), "note"
+        )
+        for r in with_notes
+    }
+    for r in with_notes:
+        r["note"] = futures[r["name"]].result()
+    records.sort(key=lambda r: (r["mtime"] or 0, r["name"]))
+    return records
+
+
+def write_note(storage: MediaStorage, name: str, note: str) -> dict:
+    note = note.strip()
+    if not (1 <= len(note) <= MAX_NOTE_CHARS):
+        raise ValueError(f"A note needs 1 to {MAX_NOTE_CHARS} characters")
+    if storage.size(name) is None:
+        raise ValueError(f"No such file: {name}")
+    record = {
+        "name": name,
+        "note": note,
+        "updated_at": datetime.datetime.now(datetime.UTC).isoformat(
+            timespec="seconds"
+        ),
+    }
+    meta.write_json(storage, meta.note_key(name), record)
+    return record
+
+
+def load_record(storage: MediaStorage, name: str) -> dict | None:
+    entry = next((e for e in storage.list() if e.name == name), None)
+    if entry is None:
+        return None
+    mtimes = meta.load_mtimes(storage)
+    mtime = mtimes.get(name, entry.mtime)
+    note = meta.read_json(storage, meta.note_key(name))
+    transcript = transcribe.get_transcript(storage, name, entry.size)
+    frames = meta.read_json(storage, meta.frames_index_key(name))
+    return {
+        "name": name,
+        "kind": kind_of(name),
+        "size": entry.size,
+        "mtime": mtime,
+        "captured": captured_iso(mtime),
+        "note": note.get("note") if note else None,
+        "transcript": transcript.get("text") if transcript else None,
+        "frames": frames,
+    }
+
+
+def resolve_audio_name(storage: MediaStorage, name: str) -> str:
+    """Maps a clip to its paired audio file (…VID_012.AVI → …AUD_012.WAV).
+
+    The device restarts its index after every sync, so several sessions
+    can each hold an AUD_012. Names carry an epoch-ms prefix, so the
+    pair is the candidate whose prefix sits closest to the clip's."""
+    stem = Path(name).stem.upper()
+    if Path(name).suffix.lower() != ".avi" or "VID_" not in stem:
+        return name
+    wanted = f"AUD_{stem.split('VID_', 1)[1]}.WAV"
+    candidates = [e.name for e in storage.list() if e.name.upper().endswith(wanted)]
+    if not candidates:
+        return name
+
+    def prefix_num(n: str) -> int | None:
+        m = re.match(r"(\d+)", n)
+        return int(m.group(1)) if m else None
+
+    vid_prefix = prefix_num(name)
+    if vid_prefix is not None:
+        numbered = [
+            (abs(p - vid_prefix), c)
+            for c in candidates
+            if (p := prefix_num(c)) is not None
+        ]
+        if numbered:
+            return min(numbered)[1]
+    return candidates[0]
+
+
+def _frame_lock(name: str) -> threading.Lock:
+    with _frame_locks_guard:
+        return _frame_locks.setdefault(name, threading.Lock())
+
+
+def clamp_frame_params(every_s: float, max_frames: int) -> tuple[float, int]:
+    return min(max(every_s, 0.2), 60.0), min(max(max_frames, 1), 32)
+
+
+def _index_current(index: dict | None, every_s: float, max_frames: int, size) -> bool:
+    return (
+        index is not None
+        and index.get("every") == every_s
+        and index.get("max") == max_frames
+        and index.get("size") == size
+    )
+
+
+def get_or_extract_frames(
+    storage: MediaStorage, name: str, every_s: float, max_frames: int
+) -> dict:
+    every_s, max_frames = clamp_frame_params(every_s, max_frames)
     size = storage.size(name)
     if size is None:
-        raise HTTPException(status_code=404, detail=f"No such file: {name}")
-    return size
-
-
-# --- transcripts -----------------------------------------------------------
-
-
-@router.get("/media/{name}/transcript")
-async def get_transcript(name: str) -> JSONResponse:
-    name = safe_name(name)
-    if Path(name).suffix.lower() != ".wav":
-        raise HTTPException(
-            status_code=400, detail="Transcripts exist for .wav files only"
-        )
-    storage = get_storage()
-    await run_in_threadpool(_require_file, storage, name)
-    record = await run_in_threadpool(transcribe.get_transcript, storage, name)
-    if record is not None:
-        return JSONResponse(record)
-    transcribe.queue_transcription(storage, name)
-    return JSONResponse({"name": name, "status": "processing"}, status_code=202)
-
-
-@router.post("/transcripts/backfill")
-async def backfill_transcripts() -> dict[str, int]:
-    storage = get_storage()
-    entries = await run_in_threadpool(storage.list)
-    done_keys = set(
-        await run_in_threadpool(storage.list_meta, meta.TRANSCRIPTS_PREFIX)
-    )
-    queued = 0
-    done = 0
-    for e in entries:
-        if Path(e.name).suffix.lower() != ".wav":
-            continue
-        if meta.transcript_key(e.name) in done_keys:
-            done += 1
-        elif transcribe.queue_transcription(storage, e.name):
-            queued += 1
-    return {"queued": queued, "done": done}
-
-
-# --- frames ----------------------------------------------------------------
+        raise ValueError(f"No such file: {name}")
+    index = meta.read_json(storage, meta.frames_index_key(name))
+    if _index_current(index, every_s, max_frames, size):
+        return index
+    with _frame_lock(name):
+        index = meta.read_json(storage, meta.frames_index_key(name))
+        if _index_current(index, every_s, max_frames, size):
+            return index
+        return _extract_frames(storage, name, every_s, max_frames, size)
 
 
 def _extract_frames(
-    storage: MediaStorage, name: str, every_s: float, max_frames: int
+    storage: MediaStorage, name: str, every_s: float, max_frames: int, size: int
 ) -> dict:
     with tempfile.NamedTemporaryFile(suffix=".avi") as tmp:
         for chunk in storage.stream(name):
@@ -95,6 +237,7 @@ def _extract_frames(
             entries.append({"i": i, "t": round(ref.t, 2), "size": ref.size})
     index = {
         "name": name,
+        "size": size,
         "every": every_s,
         "max": max_frames,
         "fps": round(fps, 2),
@@ -104,6 +247,111 @@ def _extract_frames(
     }
     meta.write_json(storage, meta.frames_index_key(name), index)
     return index
+
+
+def _snippet(text: str, token: str, radius: int = 60) -> str:
+    lower = text.lower()
+    pos = lower.find(token)
+    if pos < 0:
+        return ""
+    start = max(0, pos - radius)
+    end = min(len(text), pos + len(token) + radius)
+    clip = " ".join(text[start:end].split())
+    prefix = "…" if start > 0 else ""
+    suffix = "…" if end < len(text) else ""
+    return f"{prefix}{clip}{suffix}"
+
+
+def search_catalog(storage: MediaStorage, query: str) -> list[dict]:
+    tokens = query.lower().split()
+    if not tokens:
+        return []
+    noted = set(storage.list_meta(meta.NOTES_PREFIX))
+    transcribed = set(storage.list_meta(meta.TRANSCRIPTS_PREFIX))
+    mtimes = meta.load_mtimes(storage)
+    entries = storage.list()
+    futures = {}
+    for e in entries:
+        if meta.note_key(e.name) in noted:
+            futures[("note", e.name)] = _reader_pool.submit(
+                _read_field, storage, meta.note_key(e.name), "note"
+            )
+        if meta.transcript_key(e.name) in transcribed:
+            futures[("transcript", e.name)] = _reader_pool.submit(
+                _read_field, storage, meta.transcript_key(e.name), "text"
+            )
+    results = []
+    for e in entries:
+        sources = {"name": e.name}
+        for source in ("note", "transcript"):
+            future = futures.get((source, e.name))
+            text = future.result() if future else None
+            if text:
+                sources[source] = text
+        combined = " ".join(sources.values()).lower()
+        if not all(t in combined for t in tokens):
+            continue
+        matches = []
+        for source, text in sources.items():
+            for token in tokens:
+                snippet = _snippet(text, token)
+                if snippet:
+                    matches.append({"source": source, "snippet": snippet})
+                    break
+        mtime = mtimes.get(e.name, e.mtime)
+        results.append(
+            {
+                "name": e.name,
+                "kind": kind_of(e.name),
+                "mtime": mtime,
+                "captured": captured_iso(mtime),
+                "matches": matches,
+            }
+        )
+    return results
+
+
+# --- routes ----------------------------------------------------------------
+
+
+@router.get("/media/{name}/transcript")
+async def get_transcript(name: str) -> JSONResponse:
+    name = safe_name(name)
+    if Path(name).suffix.lower() not in (".wav", ".avi"):
+        raise HTTPException(
+            status_code=400, detail="Transcripts exist for .wav and .avi files only"
+        )
+    storage = get_storage()
+    await run_in_threadpool(require_file, storage, name)
+    resolved = await run_in_threadpool(resolve_audio_name, storage, name)
+    if resolved == name and name.lower().endswith(".avi"):
+        raise HTTPException(status_code=404, detail=f"No paired audio for {name}")
+    await run_in_threadpool(require_file, storage, resolved)
+    record = await run_in_threadpool(transcribe.get_transcript, storage, resolved)
+    if record is not None:
+        return JSONResponse(record)
+    transcribe.queue_transcription(storage, resolved)
+    return JSONResponse({"name": resolved, "status": "processing"}, status_code=202)
+
+
+@router.post("/transcripts/backfill")
+async def backfill_transcripts() -> dict[str, int]:
+    storage = get_storage()
+    entries = await run_in_threadpool(storage.list)
+    counts = {"queued": 0, "done": 0, "in_progress": 0}
+    for e in entries:
+        if Path(e.name).suffix.lower() != ".wav":
+            continue
+        record = await run_in_threadpool(
+            transcribe.get_transcript, storage, e.name, e.size
+        )
+        if record is not None:
+            counts["done"] += 1
+        elif transcribe.queue_transcription(storage, e.name):
+            counts["queued"] += 1
+        else:
+            counts["in_progress"] += 1
+    return counts
 
 
 @router.get("/media/{name}/frames")
@@ -116,13 +364,10 @@ async def get_frames(
     if Path(name).suffix.lower() != ".avi":
         raise HTTPException(status_code=400, detail="Frames exist for .avi files only")
     storage = get_storage()
-    await run_in_threadpool(_require_file, storage, name)
-    index = await run_in_threadpool(
-        meta.read_json, storage, meta.frames_index_key(name)
+    await run_in_threadpool(require_file, storage, name)
+    return await run_in_threadpool(
+        get_or_extract_frames, storage, name, every, max_frames
     )
-    if index is not None and index.get("every") == every and index.get("max") == max_frames:
-        return index
-    return await run_in_threadpool(_extract_frames, storage, name, every, max_frames)
 
 
 @router.get("/media/{name}/frames/{i}")
@@ -144,27 +389,19 @@ async def get_frame(name: str, i: int) -> Response:
     return Response(content=data, media_type="image/jpeg")
 
 
-# --- notes and the catalog -------------------------------------------------
-
-
 class NoteIn(BaseModel):
-    note: str = Field(min_length=1, max_length=20_000)
+    note: str
 
 
 @router.put("/catalog/{name}")
 async def put_note(name: str, body: NoteIn) -> dict:
     name = safe_name(name)
     storage = get_storage()
-    await run_in_threadpool(_require_file, storage, name)
-    record = {
-        "name": name,
-        "note": body.note,
-        "updated_at": datetime.datetime.now(datetime.UTC).isoformat(
-            timespec="seconds"
-        ),
-    }
-    await run_in_threadpool(meta.write_json, storage, meta.note_key(name), record)
-    return record
+    try:
+        return await run_in_threadpool(write_note, storage, name, body.note)
+    except ValueError as e:
+        status = 404 if "No such file" in str(e) else 400
+        raise HTTPException(status_code=status, detail=str(e)) from None
 
 
 @router.delete("/catalog/{name}")
@@ -177,115 +414,26 @@ async def delete_note(name: str) -> dict:
     return {"name": name, "deleted": True}
 
 
-def _build_catalog(storage: MediaStorage) -> list[dict]:
-    entries = storage.list()
-    mtimes = meta.load_mtimes(storage)
-    noted = set(storage.list_meta(meta.NOTES_PREFIX))
-    transcribed = set(storage.list_meta(meta.TRANSCRIPTS_PREFIX))
-    framed = set(storage.list_meta(meta.FRAMES_PREFIX))
-    records = []
-    for e in entries:
-        record = {
-            "name": e.name,
-            "kind": kind_of(e.name),
-            "size": e.size,
-            "mtime": mtimes.get(e.name, e.mtime),
-            "note": None,
-            "has_transcript": meta.transcript_key(e.name) in transcribed,
-            "has_frames": meta.frames_index_key(e.name) in framed,
-        }
-        if meta.note_key(e.name) in noted:
-            note = meta.read_json(storage, meta.note_key(e.name))
-            if note:
-                record["note"] = note.get("note")
-        records.append(record)
-    return records
-
-
 @router.get("/catalog")
-async def get_catalog() -> list[dict]:
+async def get_catalog(
+    day: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    kind: str | None = Query(None, pattern=r"^(photo|audio|clip)$"),
+) -> list[dict]:
     storage = get_storage()
-    return await run_in_threadpool(_build_catalog, storage)
+    return await run_in_threadpool(build_catalog, storage, day, kind)
 
 
 @router.get("/catalog/{name}")
 async def get_record(name: str) -> dict:
     name = safe_name(name)
     storage = get_storage()
-    size = await run_in_threadpool(_require_file, storage, name)
-    mtimes = await run_in_threadpool(meta.load_mtimes, storage)
-    note = await run_in_threadpool(meta.read_json, storage, meta.note_key(name))
-    transcript = await run_in_threadpool(transcribe.get_transcript, storage, name)
-    frames = await run_in_threadpool(
-        meta.read_json, storage, meta.frames_index_key(name)
-    )
-    return {
-        "name": name,
-        "kind": kind_of(name),
-        "size": size,
-        "mtime": mtimes.get(name),
-        "note": note.get("note") if note else None,
-        "transcript": transcript.get("text") if transcript else None,
-        "frames": frames,
-    }
-
-
-# --- search ----------------------------------------------------------------
-
-
-def _snippet(text: str, token: str, radius: int = 60) -> str:
-    lower = text.lower()
-    pos = lower.find(token)
-    if pos < 0:
-        return ""
-    start = max(0, pos - radius)
-    end = min(len(text), pos + len(token) + radius)
-    clip = " ".join(text[start:end].split())
-    prefix = "…" if start > 0 else ""
-    suffix = "…" if end < len(text) else ""
-    return f"{prefix}{clip}{suffix}"
-
-
-def _search(storage: MediaStorage, query: str) -> list[dict]:
-    tokens = [t for t in query.lower().split() if t]
-    if not tokens:
-        return []
-    noted = set(storage.list_meta(meta.NOTES_PREFIX))
-    transcribed = set(storage.list_meta(meta.TRANSCRIPTS_PREFIX))
-    mtimes = meta.load_mtimes(storage)
-    results = []
-    for e in storage.list():
-        sources = {"name": e.name}
-        if meta.note_key(e.name) in noted:
-            note = meta.read_json(storage, meta.note_key(e.name))
-            if note and note.get("note"):
-                sources["note"] = note["note"]
-        if meta.transcript_key(e.name) in transcribed:
-            transcript = meta.read_json(storage, meta.transcript_key(e.name))
-            if transcript and transcript.get("text"):
-                sources["transcript"] = transcript["text"]
-        combined = " ".join(sources.values()).lower()
-        if not all(t in combined for t in tokens):
-            continue
-        matches = []
-        for source, text in sources.items():
-            for token in tokens:
-                snippet = _snippet(text, token)
-                if snippet:
-                    matches.append({"source": source, "snippet": snippet})
-                    break
-        results.append(
-            {
-                "name": e.name,
-                "kind": kind_of(e.name),
-                "mtime": mtimes.get(e.name, e.mtime),
-                "matches": matches,
-            }
-        )
-    return results
+    record = await run_in_threadpool(load_record, storage, name)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"No such file: {name}")
+    return record
 
 
 @router.get("/search")
 async def search(q: str = Query(min_length=1, max_length=500)) -> list[dict]:
     storage = get_storage()
-    return await run_in_threadpool(_search, storage, q)
+    return await run_in_threadpool(search_catalog, storage, q)

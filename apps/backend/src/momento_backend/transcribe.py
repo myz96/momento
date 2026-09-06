@@ -30,14 +30,17 @@ _model = None
 _model_lock = threading.Lock()
 
 
+def _model_name() -> str:
+    return os.environ.get("MOMENTO_WHISPER_MODEL", "base.en")
+
+
 def _get_model():
     global _model
     with _model_lock:
         if _model is None:
             from faster_whisper import WhisperModel
 
-            name = os.environ.get("MOMENTO_WHISPER_MODEL", "base.en")
-            _model = WhisperModel(name, device="cpu", compute_type="int8")
+            _model = WhisperModel(_model_name(), device="cpu", compute_type="int8")
         return _model
 
 
@@ -52,17 +55,25 @@ def _transcribe_file(wav_path: str) -> dict:
         "text": text,
         "language": info.language,
         "duration_s": round(info.duration, 1),
-        "model": os.environ.get("MOMENTO_WHISPER_MODEL", "base.en"),
+        "model": _model_name(),
     }
 
 
-def get_transcript(storage: MediaStorage, name: str) -> dict | None:
-    return meta.read_json(storage, meta.transcript_key(name))
-
-
-def is_inflight(name: str) -> bool:
-    with _inflight_lock:
-        return name in _inflight
+def get_transcript(
+    storage: MediaStorage, name: str, size: int | None = None
+) -> dict | None:
+    """Returns the cached transcript only when it matches the file's
+    current bytes (by size) — a healed or replaced upload must never
+    keep serving the old file's words. Pass size when the caller
+    already knows it, to spare a storage round trip."""
+    record = meta.read_json(storage, meta.transcript_key(name))
+    if record is None:
+        return None
+    if size is None:
+        size = storage.size(name)
+    if record.get("size") != size:
+        return None
+    return record
 
 
 def queue_transcription(storage: MediaStorage, name: str) -> bool:
@@ -79,13 +90,16 @@ def _job(storage: MediaStorage, name: str) -> None:
     try:
         if get_transcript(storage, name) is not None:
             return
+        size = 0
         with tempfile.NamedTemporaryFile(suffix=".wav") as tmp:
             for chunk in storage.stream(name):
                 tmp.write(chunk)
+                size += len(chunk)
             tmp.flush()
             result = _transcribe_file(tmp.name)
         record = {
             "name": name,
+            "size": size,
             "created_at": datetime.datetime.now(datetime.UTC).isoformat(
                 timespec="seconds"
             ),

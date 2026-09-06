@@ -17,7 +17,6 @@ JPEG_SOI = b"\xff\xd8"
 
 @dataclass
 class FrameRef:
-    index: int  # frame number within the clip
     t: float  # seconds from the start
     offset: int  # payload offset in the file
     size: int  # payload size in bytes
@@ -57,12 +56,7 @@ def scan_frames(path: str) -> tuple[float, list[FrameRef]]:
                     and m[start : start + 2] == JPEG_SOI
                 ):
                     frames.append(
-                        FrameRef(
-                            index=len(frames),
-                            t=len(frames) / fps,
-                            offset=start,
-                            size=size,
-                        )
+                        FrameRef(t=len(frames) / fps, offset=start, size=size)
                     )
                     pos = start + size
                 else:
@@ -86,8 +80,7 @@ def pick_frames(
         if max_frames == 1:
             return [frames[0]]
         n = len(frames)
-        indices = sorted({round(k * (n - 1) / (max_frames - 1)) for k in range(max_frames)})
-        picks = [frames[i] for i in indices]
+        picks = [frames[round(k * (n - 1) / (max_frames - 1))] for k in range(max_frames)]
     return picks
 
 

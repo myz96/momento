@@ -75,5 +75,6 @@ class _Dispatch:
         await self.main(scope, receive, send)
 
 
-# Remote agents (claude.ai, phones) connect to /mcp; same key, ASGI-level.
-app = _Dispatch(api, KeyGate(mcp_app))
+# One auth chokepoint wraps everything — routes and /mcp alike — so a
+# new route is closed by default (auth.py lists the open paths).
+app = KeyGate(_Dispatch(api, mcp_app))

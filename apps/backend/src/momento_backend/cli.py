@@ -53,11 +53,29 @@ def _fail(response: httpx.Response) -> None:
     sys.exit(f"momento: {response.status_code} {detail}")
 
 
+def _ok(response: httpx.Response) -> httpx.Response:
+    if response.status_code != 200:
+        _fail(response)
+    return response
+
+
+def _local(mtime: int) -> datetime.datetime:
+    return datetime.datetime.fromtimestamp(mtime, tz=datetime.UTC).astimezone()
+
+
 def _fmt_time(mtime: int | None) -> str:
     if not mtime:
         return "unknown-time      "
-    local = datetime.datetime.fromtimestamp(mtime, tz=datetime.UTC).astimezone()
-    return local.strftime("%Y-%m-%d %H:%M ")
+    return _local(mtime).strftime("%Y-%m-%d %H:%M ")
+
+
+def _when(record: dict) -> str:
+    """Displays the server's home-timezone capture time, so the dates
+    shown always agree with what --day matches."""
+    captured = record.get("captured")
+    if captured:
+        return captured[:16].replace("T", " ") + " "
+    return _fmt_time(record.get("mtime"))
 
 
 def _fmt_size(size: int) -> str:
@@ -66,44 +84,12 @@ def _fmt_size(size: int) -> str:
     return f"{size / 1024:.0f}KB"
 
 
-def _day_of(mtime: int | None) -> str | None:
-    if not mtime:
-        return None
-    local = datetime.datetime.fromtimestamp(mtime, tz=datetime.UTC).astimezone()
-    return local.strftime("%Y-%m-%d")
-
-
-def _audio_name(client: httpx.Client, name: str) -> str:
-    """Maps a clip to its paired audio file (…VID_012.AVI -> …AUD_012.WAV).
-
-    Synced names carry an epoch-ms prefix, so the pair is found by its
-    index in the live file list, not by string surgery on the name.
-    """
-    stem = Path(name).stem.upper()
-    if Path(name).suffix.lower() != ".avi" or "VID_" not in stem:
-        return name
-    index = stem.split("VID_", 1)[1]
-    response = client.get("/media")
-    if response.status_code != 200:
-        return name
-    wanted = f"AUD_{index}.WAV"
-    for entry in response.json():
-        if entry["name"].upper().endswith(wanted):
-            return entry["name"]
-    return name
-
-
 def cmd_ls(args: argparse.Namespace) -> None:
+    # Day and kind filter on the backend, in the home timezone, so the
+    # CLI and MCP views of one day never disagree.
+    params = {k: v for k, v in (("day", args.day), ("kind", args.kind)) if v}
     with _client() as client:
-        response = client.get("/catalog")
-        if response.status_code != 200:
-            _fail(response)
-        records = response.json()
-    if args.kind:
-        records = [r for r in records if r["kind"] == args.kind]
-    if args.day:
-        records = [r for r in records if _day_of(r["mtime"]) == args.day]
-    records.sort(key=lambda r: (r["mtime"] or 0, r["name"]))
+        records = _ok(client.get("/catalog", params=params)).json()
     if args.json:
         print(json.dumps(records, indent=2))
         return
@@ -118,7 +104,7 @@ def cmd_ls(args: argparse.Namespace) -> None:
             flags.append("transcript")
         flag_s = f" [{','.join(flags)}]" if flags else ""
         print(
-            f"{_fmt_time(r['mtime'])}{r['name']:<18} {r['kind']:<6}"
+            f"{_when(r)}{r['name']:<18} {r['kind']:<6}"
             f" {_fmt_size(r['size']):>8}{flag_s}"
         )
 
@@ -143,13 +129,12 @@ def cmd_get(args: argparse.Namespace) -> None:
 
 def cmd_frames(args: argparse.Namespace) -> None:
     with _client() as client:
-        response = client.get(
-            f"/media/{args.name}/frames",
-            params={"every": args.every, "max": args.max},
-        )
-        if response.status_code != 200:
-            _fail(response)
-        index = response.json()
+        index = _ok(
+            client.get(
+                f"/media/{args.name}/frames",
+                params={"every": args.every, "max": args.max},
+            )
+        ).json()
         print(
             f"# {args.name}: {index['duration_s']}s, {index['total_frames']} frames,"
             f" showing {len(index['frames'])}",
@@ -162,15 +147,15 @@ def cmd_frames(args: argparse.Namespace) -> None:
 
 
 def cmd_transcript(args: argparse.Namespace) -> None:
+    # The backend resolves a VID_* clip to its paired AUD_* file.
     deadline = time.monotonic() + (0 if args.no_wait else TRANSCRIPT_WAIT_S)
     with _client() as client:
-        name = _audio_name(client, args.name)
-        if name != args.name:
-            print(f"# clip audio lives in {name}", file=sys.stderr)
         while True:
-            response = client.get(f"/media/{name}/transcript")
+            response = client.get(f"/media/{args.name}/transcript")
             if response.status_code == 200:
                 record = response.json()
+                if record["name"] != args.name:
+                    print(f"# clip audio lives in {record['name']}", file=sys.stderr)
                 print(record["text"] or "(silence — the transcript is empty)")
                 return
             if response.status_code != 202:
@@ -186,31 +171,24 @@ def cmd_transcript(args: argparse.Namespace) -> None:
 def cmd_note(args: argparse.Namespace) -> None:
     with _client() as client:
         if args.delete:
-            response = client.delete(f"/catalog/{args.name}")
-            if response.status_code != 200:
-                _fail(response)
+            _ok(client.delete(f"/catalog/{args.name}"))
             print(f"note deleted for {args.name}")
             return
         text = " ".join(args.text).strip()
         if not text:
             sys.exit("momento: a note needs text (or pass --delete)")
-        response = client.put(f"/catalog/{args.name}", json={"note": text})
-        if response.status_code != 200:
-            _fail(response)
+        _ok(client.put(f"/catalog/{args.name}", json={"note": text}))
         print(f"note saved for {args.name}")
 
 
 def cmd_show(args: argparse.Namespace) -> None:
     with _client() as client:
-        response = client.get(f"/catalog/{args.name}")
-        if response.status_code != 200:
-            _fail(response)
-        record = response.json()
+        record = _ok(client.get(f"/catalog/{args.name}")).json()
     if args.json:
         print(json.dumps(record, indent=2))
         return
     print(f"name:       {record['name']} ({record['kind']})")
-    print(f"captured:   {_fmt_time(record['mtime']).strip() or 'unknown'}")
+    print(f"captured:   {_when(record).strip()}")
     print(f"size:       {_fmt_size(record['size'])}")
     print(f"note:       {record['note'] or '(none — add one after you look)'}")
     if record["transcript"] is not None:
@@ -222,10 +200,7 @@ def cmd_show(args: argparse.Namespace) -> None:
 def cmd_search(args: argparse.Namespace) -> None:
     query = " ".join(args.query)
     with _client() as client:
-        response = client.get("/search", params={"q": query})
-        if response.status_code != 200:
-            _fail(response)
-        hits = response.json()
+        hits = _ok(client.get("/search", params={"q": query})).json()
     if args.json:
         print(json.dumps(hits, indent=2))
         return
@@ -233,18 +208,18 @@ def cmd_search(args: argparse.Namespace) -> None:
         print("no matches — try `momento ls` and inspect files near the right date")
         return
     for hit in hits:
-        print(f"{hit['name']} ({hit['kind']}, {_fmt_time(hit['mtime']).strip()})")
+        print(f"{hit['name']} ({hit['kind']}, {_when(hit).strip()})")
         for m in hit["matches"]:
             print(f"  {m['source']}: {m['snippet']}")
 
 
 def cmd_backfill(_: argparse.Namespace) -> None:
     with _client() as client:
-        response = client.post("/transcripts/backfill")
-        if response.status_code != 200:
-            _fail(response)
-        counts = response.json()
-    print(f"queued {counts['queued']}, already done {counts['done']}")
+        counts = _ok(client.post("/transcripts/backfill")).json()
+    print(
+        f"queued {counts['queued']}, already done {counts['done']},"
+        f" in progress {counts['in_progress']}"
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -261,7 +236,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("ls", help="list files with dates, kinds, and enrichment flags")
-    p.add_argument("--day", help="filter to one local day, YYYY-MM-DD")
+    p.add_argument("--day", help="filter to one home-timezone day, YYYY-MM-DD")
     p.add_argument("--kind", choices=["photo", "audio", "clip"])
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_ls)

@@ -332,6 +332,7 @@ static bool record_clip(void)
     int rec_high_streak = 0; /* REC must read released before a stop press counts */
     int rec_low_streak = 0;
     const char *stop_reason = "time limit";
+    bool cap_stop = true; /* false once anything other than the cap ends the clip */
 
     while (esp_timer_get_time() - t0 < MAX_RECORD_US) {
         camera_fb_t *fb = esp_camera_fb_get();
@@ -340,6 +341,7 @@ static bool record_clip(void)
             if (now >= next_store) {
                 if (avi_stream_add_frame(&avi, fb->buf, fb->len) != ESP_OK) {
                     stop_reason = "SD write failed";
+                    cap_stop = false;
                     esp_camera_fb_return(fb);
                     break;
                 }
@@ -358,6 +360,7 @@ static bool record_clip(void)
         if (fb && now >= next_flush) {
             if (avi_stream_sync(&avi) != ESP_OK) {
                 stop_reason = "SD write failed";
+                cap_stop = false;
                 break;
             }
             next_flush = now + FLUSH_INTERVAL_US;
@@ -365,6 +368,7 @@ static bool record_clip(void)
 
         if (job.failed) {
             stop_reason = "SD write failed";
+            cap_stop = false;
             break;
         }
 
@@ -375,6 +379,7 @@ static bool record_clip(void)
             rec_low_streak++;
             if (rec_low_streak >= 2) {
                 stop_reason = "REC pressed";
+                cap_stop = false;
                 break;
             }
         }
@@ -422,7 +427,7 @@ static bool record_clip(void)
     gpio_set_level(PIN_LED, 0);
     /* A clean cap stop with nothing on disk (dead camera AND dead mic)
      * must not loop forever producing empty pairs. */
-    return strcmp(stop_reason, "time limit") == 0 && !(no_video && no_audio);
+    return cap_stop && !(no_video && no_audio);
 }
 
 static bool button_pressed(gpio_num_t pin)
@@ -555,6 +560,12 @@ void app_main(void)
             ESP_LOGI(TAG, "REC button pressed, recording starts");
             wait_release(PIN_BTN_REC);
             while (record_clip()) {
+                /* A stop press can land while the clip finalizes; it
+                 * must end the session, not be swallowed by the roll. */
+                if (gpio_get_level(PIN_BTN_REC) == 0) {
+                    ESP_LOGI(TAG, "REC pressed during clip roll, recording stops");
+                    break;
+                }
                 ESP_LOGI(TAG, "Clip cap reached; rolling into a new clip");
             }
             wait_release(PIN_BTN_REC);

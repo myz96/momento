@@ -8,12 +8,12 @@ shared document.
 import json
 import threading
 
-from momento_backend.storage import MediaStorage
+from momento_backend.storage import META_PREFIX, MediaStorage
 
-MTIMES_KEY = "_meta/mtimes.json"
-NOTES_PREFIX = "_meta/notes/"
-TRANSCRIPTS_PREFIX = "_meta/transcripts/"
-FRAMES_PREFIX = "_meta/frames/"
+MTIMES_KEY = f"{META_PREFIX}mtimes.json"
+NOTES_PREFIX = f"{META_PREFIX}notes/"
+TRANSCRIPTS_PREFIX = f"{META_PREFIX}transcripts/"
+FRAMES_PREFIX = f"{META_PREFIX}frames/"
 
 # The app uploads sequentially, but two requests can still overlap; one
 # process-wide lock keeps the read-modify-write on mtimes.json safe.
