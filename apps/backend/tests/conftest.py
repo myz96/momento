@@ -15,3 +15,9 @@ def _isolate_from_real_r2(monkeypatch):
     (main.py loads it at import time)."""
     for var in R2_VARS:
         monkeypatch.delenv(var, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _fake_transcriber(monkeypatch):
+    """No test may ever load real whisper weights."""
+    monkeypatch.setenv("MOMENTO_FAKE_TRANSCRIPT", "fake transcript about the battery")

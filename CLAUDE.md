@@ -45,7 +45,7 @@ Tauri 2.0 app for macOS and iOS. Rust backend with a React frontend. Syncs media
 > Tauri supports Windows, Linux, and Android, but Momento targets macOS and iOS for now.
 
 ### Backend (`apps/backend/`)
-Python FastAPI backend for cloud sync, user accounts, media processing. Serves health and `/media` routes (upload, list, download); the app's cloud backup uses them. A real cloud host is still pending.
+Python FastAPI backend, hosted at https://momento-backend.fly.dev (Fly.io, R2 storage). Serves `/media` routes (upload, list, download) for the app's cloud backup, plus the AI layer: whisper transcripts, MJPEG frame extraction, notes, and search under `/catalog`. The `momento` CLI (`uv run --project apps/backend momento`) plus the `.claude/skills/momento` skill let an agent search and inspect the library.
 
 **Tech**: Python 3.12, FastAPI, uv, pytest, ruff
 **Build**: `just backend-dev` or `cd apps/backend && uv run uvicorn --app-dir src momento_backend.main:app --reload`
@@ -97,5 +97,5 @@ Each sub-app defines its own style in its CLAUDE.md. No cross-app style enforcem
 The sync contract is documented in `packages/device-protocol/README.md`. Current state:
 - **Wi-Fi**: in sync mode the device runs AP+station (its own SoftAP always up, plus the provisioned home network) with an HTTP file server; the app pulls files and clears the SD card
 - **Bluetooth Low Energy (BLE)**: implemented for Wi-Fi credential provisioning (`ble_prov.c` ↔ `provision_wifi`)
-- **Cloud sync**: implemented app → backend (`/media` routes) with optional free-space offload; a real cloud host is still pending
+- **Cloud sync**: implemented app → backend (`/media` routes) with optional free-space offload; hosted at https://momento-backend.fly.dev
 - **Media formats**: JPEG (photos), WAV (audio), MJPEG AVI (clips)

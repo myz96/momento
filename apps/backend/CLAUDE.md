@@ -17,12 +17,42 @@ just backend-lint   # uv run ruff check .
 | Route | Method | Purpose |
 |-------|--------|---------|
 | `/health` | GET | liveness check |
-| `/media` | POST | multipart upload of one media file |
-| `/media` | GET | list stored files `[{"name","size"}]` |
-| `/media/{name}` | GET | download one file |
+| `/media` | POST | multipart upload; optional `mtime` form field records the capture time |
+| `/media` | GET | list stored files `[{"name","size","mtime"}]` |
+| `/media/{name}` | GET | download one file (Range supported) |
+| `/media/{name}/transcript` | GET | cached whisper transcript; 202 + queue when missing |
+| `/media/{name}/frames` | GET | MJPEG frame index (`every`, `max` params); extracts on first call |
+| `/media/{name}/frames/{i}` | GET | one extracted frame as JPEG |
+| `/transcripts/backfill` | POST | queue transcripts for every memo missing one |
+| `/catalog` | GET | every file joined with kind, mtime, note, enrichment flags |
+| `/catalog/{name}` | GET/PUT/DELETE | one record / save a note / remove a note |
+| `/search` | GET | `?q=` keyword search over names, notes, transcripts |
 
 Only `.jpg`, `.jpeg`, `.wav`, `.avi` names are accepted. `safe_name`
 rejects anything that could escape the storage directory.
+
+## AI layer
+
+The catalog routes exist for agents (see `.claude/skills/momento/` and
+the `momento` CLI, `src/momento_backend/cli.py`). The split of labor:
+the backend does mechanical extraction and stores knowledge; the
+reading agent does the understanding.
+
+- **Transcripts are eager** because they are free: every uploaded `.wav`
+  queues a faster-whisper job (`transcribe.py`, base.en int8, one worker
+  thread, model baked into the Docker image). Jobs are idempotent — a
+  machine stop mid-job just leaves the transcript missing and the next
+  request re-queues it.
+- **Everything else is lazy**: frames extract on first request
+  (`avi_frames.py` scans our own `00dc` chunks, no codecs); image
+  understanding happens in the calling agent's own vision; the agent
+  writes what it learned back as a note (`PUT /catalog/{name}`).
+- Derived data lives under the `_meta/` prefix next to the media
+  (`meta.py`); anything with a "/" in its key never appears in the
+  media list.
+- v2 (planned): mount an MCP endpoint on this same app so claude.ai and
+  phones can connect. Keep logic out of the CLI so that stays a one-day
+  job.
 
 ## Storage
 

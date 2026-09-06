@@ -434,7 +434,12 @@ async fn backup_to_cloud(
         });
         let bytes = fs::read(&f.path).map_err(err_str)?;
         let part = reqwest::multipart::Part::bytes(bytes).file_name(f.name.clone());
-        let form = reqwest::multipart::Form::new().part("file", part);
+        // The capture time travels with the upload so the cloud copy
+        // keeps its place on the timeline after the local file is gone.
+        let mut form = reqwest::multipart::Form::new().part("file", part);
+        if f.modified_ms > 0 {
+            form = form.text("mtime", (f.modified_ms / 1000).to_string());
+        }
         with_key(client.post(format!("{backend}/media")))
             .multipart(form)
             .send()

@@ -23,7 +23,10 @@ async def test_upload_then_list_then_download(client: AsyncClient) -> None:
 
     response = await client.get("/media")
     assert response.status_code == 200
-    assert response.json() == [{"name": "PHOTO_001.JPG", "size": len(payload)}]
+    (entry,) = response.json()
+    assert entry["name"] == "PHOTO_001.JPG"
+    assert entry["size"] == len(payload)
+    assert isinstance(entry["mtime"], int)  # upload time when none was sent
 
     response = await client.get("/media/PHOTO_001.JPG")
     assert response.status_code == 200

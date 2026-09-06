@@ -10,6 +10,8 @@ primary_region = "syd"
   auto_start_machines = true
   min_machines_running = 0
 
+# 1 GB fits the whisper model (base.en int8) with headroom for frame
+# extraction; auto-stop keeps the bigger machine cheap.
 [[vm]]
   size = "shared-cpu-1x"
-  memory = "256mb"
+  memory = "1gb"

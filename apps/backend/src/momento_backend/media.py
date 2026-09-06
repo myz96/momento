@@ -6,10 +6,11 @@ disk by default, Cloudflare R2 when the MOMENTO_R2_* variables are set.
 
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
+from momento_backend import meta, transcribe
 from momento_backend.auth import require_key
 from momento_backend.storage import MediaStorage, storage_from_env
 
@@ -46,18 +47,32 @@ def safe_name(name: str) -> str:
 
 
 @router.post("", status_code=201)
-async def upload_media(file: UploadFile) -> dict[str, int | str]:
+async def upload_media(
+    file: UploadFile, mtime: int | None = Form(None)
+) -> dict[str, int | str]:
     name = safe_name(file.filename or "")
     storage = get_storage()
     size = await run_in_threadpool(storage.save, name, file.file)
+    if mtime is not None and mtime > 0:
+        await run_in_threadpool(meta.record_mtime, storage, name, mtime)
+    # Transcripts are free (local CPU), so produce them eagerly; every
+    # other enrichment waits until an agent asks.
+    if Path(name).suffix.lower() == ".wav":
+        transcribe.queue_transcription(storage, name)
     return {"name": name, "size": size}
 
 
 @router.get("")
-async def list_media() -> list[dict[str, int | str]]:
+async def list_media() -> list[dict[str, int | None | str]]:
     storage = get_storage()
     entries = await run_in_threadpool(storage.list)
-    return [{"name": e.name, "size": e.size} for e in entries]
+    mtimes = await run_in_threadpool(meta.load_mtimes, storage)
+    # The recorded capture time wins; the storage timestamp (upload time)
+    # is the fallback for files uploaded before mtime support existed.
+    return [
+        {"name": e.name, "size": e.size, "mtime": mtimes.get(e.name, e.mtime)}
+        for e in entries
+    ]
 
 
 def parse_range(header: str, size: int) -> tuple[int, int] | None:

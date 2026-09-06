@@ -15,11 +15,24 @@ from typing import BinaryIO, Protocol
 
 CHUNK_BYTES = 1024 * 1024
 
+# Derived data (transcripts, notes, extracted frames) lives under this
+# prefix, next to the media it describes. The media routes never list or
+# serve it: keys with "/" are filtered from list() and rejected by
+# safe_name.
+META_PREFIX = "_meta/"
+
+
+def _check_meta_key(key: str) -> str:
+    if not key.startswith(META_PREFIX) or ".." in key:
+        raise ValueError(f"Not a meta key: {key!r}")
+    return key
+
 
 @dataclass
 class StoredFile:
     name: str
     size: int
+    mtime: int | None = None
 
 
 class MediaStorage(Protocol):
@@ -30,6 +43,14 @@ class MediaStorage(Protocol):
     def size(self, name: str) -> int | None: ...
 
     def stream(self, name: str, start: int = 0, end: int | None = None) -> Iterator[bytes]: ...
+
+    def read_meta(self, key: str) -> bytes | None: ...
+
+    def write_meta(self, key: str, data: bytes) -> None: ...
+
+    def delete_meta(self, key: str) -> bool: ...
+
+    def list_meta(self, prefix: str) -> "list[str]": ...
 
 
 class DiskStorage:
@@ -60,7 +81,11 @@ class DiskStorage:
 
     def list(self) -> list[StoredFile]:
         entries = [
-            StoredFile(name=p.name, size=p.stat().st_size)
+            StoredFile(
+                name=p.name,
+                size=p.stat().st_size,
+                mtime=int(p.stat().st_mtime),
+            )
             for p in self._dir().iterdir()
             if p.is_file() and p.suffix.lower() in self.allowed_suffixes
         ]
@@ -87,6 +112,46 @@ class DiskStorage:
                 if remaining is not None:
                     remaining -= len(chunk)
                 yield chunk
+
+    def read_meta(self, key: str) -> bytes | None:
+        path = self._dir() / _check_meta_key(key)
+        try:
+            return path.read_bytes()
+        except FileNotFoundError:
+            return None
+
+    def write_meta(self, key: str, data: bytes) -> None:
+        path = self._dir() / _check_meta_key(key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Same stage-then-rename pattern as save(): a crash never leaves a
+        # truncated meta object under the final name.
+        stage = path.with_name(f"{path.name}.{uuid.uuid4().hex}.part")
+        try:
+            stage.write_bytes(data)
+            stage.replace(path)
+        except Exception:
+            stage.unlink(missing_ok=True)
+            raise
+
+    def delete_meta(self, key: str) -> bool:
+        path = self._dir() / _check_meta_key(key)
+        try:
+            path.unlink()
+            return True
+        except FileNotFoundError:
+            return False
+
+    def list_meta(self, prefix: str) -> "list[str]":
+        base = self._dir() / _check_meta_key(prefix)
+        if not base.is_dir():
+            return []
+        keys = [
+            str(p.relative_to(self._dir()).as_posix())
+            for p in base.rglob("*")
+            if p.is_file() and not p.name.endswith(".part")
+        ]
+        keys.sort()
+        return keys
 
 
 class R2Storage:
@@ -118,7 +183,17 @@ class R2Storage:
         paginator = self.client.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=self.bucket):
             for obj in page.get("Contents", []):
-                entries.append(StoredFile(name=obj["Key"], size=obj["Size"]))
+                # Media files sit at the bucket root; anything with a "/"
+                # is derived data under _meta/ and never a media file.
+                if "/" in obj["Key"]:
+                    continue
+                entries.append(
+                    StoredFile(
+                        name=obj["Key"],
+                        size=obj["Size"],
+                        mtime=int(obj["LastModified"].timestamp()),
+                    )
+                )
         entries.sort(key=lambda e: e.name)
         return entries
 
@@ -138,6 +213,40 @@ class R2Storage:
         body = self.client.get_object(**kwargs)["Body"]
         while chunk := body.read(CHUNK_BYTES):
             yield chunk
+
+    def read_meta(self, key: str) -> bytes | None:
+        try:
+            body = self.client.get_object(
+                Bucket=self.bucket, Key=_check_meta_key(key)
+            )["Body"]
+            return body.read()
+        except self.client.exceptions.ClientError:
+            return None
+
+    def write_meta(self, key: str, data: bytes) -> None:
+        self.client.put_object(
+            Bucket=self.bucket, Key=_check_meta_key(key), Body=data
+        )
+
+    def delete_meta(self, key: str) -> bool:
+        key = _check_meta_key(key)
+        try:
+            self.client.head_object(Bucket=self.bucket, Key=key)
+        except self.client.exceptions.ClientError:
+            return False
+        self.client.delete_object(Bucket=self.bucket, Key=key)
+        return True
+
+    def list_meta(self, prefix: str) -> "list[str]":
+        keys: list[str] = []
+        paginator = self.client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(
+            Bucket=self.bucket, Prefix=_check_meta_key(prefix)
+        ):
+            for obj in page.get("Contents", []):
+                keys.append(obj["Key"])
+        keys.sort()
+        return keys
 
 
 def storage_from_env(allowed_suffixes: set[str]) -> MediaStorage:

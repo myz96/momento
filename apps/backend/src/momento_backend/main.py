@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
 
+from momento_backend.catalog import router as catalog_router
 from momento_backend.media import router as media_router
 
 app = FastAPI(title="Momento Backend")
@@ -12,9 +13,13 @@ app = FastAPI(title="Momento Backend")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["GET", "POST", "DELETE"],
-    allow_headers=["Authorization", "Range"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_headers=["Authorization", "Range", "Content-Type"],
 )
+# The catalog router registers /media/{name}/transcript and /frames;
+# they never collide with /media/{name} because a path parameter does
+# not match across "/".
+app.include_router(catalog_router)
 app.include_router(media_router)
 
 
