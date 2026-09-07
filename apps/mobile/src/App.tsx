@@ -455,7 +455,7 @@ function App() {
                 <h2 className="day-head">{label}</h2>
                 {visual.length > 0 && (
                   <div className="tiles">
-                    {visual.map((m) => {
+                    {visual.map((m, tileIndex) => {
                       const inCloud = m.location === "cloud";
                       const full = inCloud
                         ? `${backendUrl}/media/${m.name}${
@@ -476,6 +476,7 @@ function App() {
                         <button
                           className="tile"
                           key={m.name}
+                          style={{ "--i": Math.min(tileIndex, 11) } as React.CSSProperties}
                           onClick={() => setViewer({ file: m, src: full })}
                           title={`${m.kind === "video" ? "Clip" : "Photo"} · ${formatTime(m.modified_ms)} · ${formatBytes(m.size)}${inCloud ? " · in the cloud" : ""}`}
                         >
