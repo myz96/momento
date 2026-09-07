@@ -26,8 +26,8 @@ _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="transcribe")
 _inflight: set[str] = set()
 _inflight_lock = threading.Lock()
 
+# Only the single executor thread touches the model, so no lock.
 _model = None
-_model_lock = threading.Lock()
 
 
 def _model_name() -> str:
@@ -36,12 +36,11 @@ def _model_name() -> str:
 
 def _get_model():
     global _model
-    with _model_lock:
-        if _model is None:
-            from faster_whisper import WhisperModel
+    if _model is None:
+        from faster_whisper import WhisperModel
 
-            _model = WhisperModel(_model_name(), device="cpu", compute_type="int8")
-        return _model
+        _model = WhisperModel(_model_name(), device="cpu", compute_type="int8")
+    return _model
 
 
 def _transcribe_file(wav_path: str) -> dict:

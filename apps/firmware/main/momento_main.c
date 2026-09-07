@@ -389,9 +389,22 @@ static bool record_clip(void)
     /* Wait long: closing the file under a live fwrite corrupts memory,
      * and FATFS can stall ~10 s on a worn card. 30 s means the card is
      * truly wedged — then leak the audio resources deliberately instead
-     * of corrupting memory or hanging the device forever. */
+     * of corrupting memory or hanging the device forever. Poll REC in
+     * slices while waiting: a stop press completed during this window
+     * must end the session, not be lost to the roll-over. */
     job.stop = true;
-    if (xSemaphoreTake(job.done, pdMS_TO_TICKS(30000)) != pdTRUE) {
+    bool stop_pressed_late = false;
+    bool joined = false;
+    for (int waited_ms = 0; waited_ms < 30000; waited_ms += 50) {
+        if (xSemaphoreTake(job.done, pdMS_TO_TICKS(50)) == pdTRUE) {
+            joined = true;
+            break;
+        }
+        if (gpio_get_level(PIN_BTN_REC) == 0) {
+            stop_pressed_late = true;
+        }
+    }
+    if (!joined) {
         /* The zombie task still owns the static job and wav structs, so
          * the latch blocks every later recording until a reboot. */
         s_audio_wedged = true;
@@ -427,7 +440,7 @@ static bool record_clip(void)
     gpio_set_level(PIN_LED, 0);
     /* A clean cap stop with nothing on disk (dead camera AND dead mic)
      * must not loop forever producing empty pairs. */
-    return cap_stop && !(no_video && no_audio);
+    return cap_stop && !stop_pressed_late && !(no_video && no_audio);
 }
 
 static bool button_pressed(gpio_num_t pin)

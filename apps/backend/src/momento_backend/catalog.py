@@ -57,18 +57,25 @@ def home_tz() -> datetime.tzinfo:
         return datetime.UTC
 
 
-def day_of(mtime: int | None) -> str | None:
+def _local_time(mtime: int | None) -> datetime.datetime | None:
+    """None for absent AND for garbage values (e.g. milliseconds stored
+    as seconds) — one bad stored mtime must not 500 the whole catalog."""
     if not mtime:
         return None
-    local = datetime.datetime.fromtimestamp(mtime, tz=home_tz())
-    return local.strftime("%Y-%m-%d")
+    try:
+        return datetime.datetime.fromtimestamp(mtime, tz=home_tz())
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
+def day_of(mtime: int | None) -> str | None:
+    local = _local_time(mtime)
+    return local.strftime("%Y-%m-%d") if local else None
 
 
 def captured_iso(mtime: int | None) -> str | None:
-    if not mtime:
-        return None
-    local = datetime.datetime.fromtimestamp(mtime, tz=home_tz())
-    return local.isoformat(timespec="minutes")
+    local = _local_time(mtime)
+    return local.isoformat(timespec="minutes") if local else None
 
 
 def _read_field(storage: MediaStorage, key: str, field: str) -> str | None:
@@ -155,12 +162,20 @@ def load_record(storage: MediaStorage, name: str) -> dict | None:
     }
 
 
+# A real pair's epoch-ms prefixes are stamped in the same sync run,
+# seconds apart. A candidate further away belongs to another session —
+# a clip whose true pair is gone must get "no pair", never another
+# recording's words.
+PAIR_WINDOW_MS = 10 * 60 * 1000
+
+
 def resolve_audio_name(storage: MediaStorage, name: str) -> str:
     """Maps a clip to its paired audio file (…VID_012.AVI → …AUD_012.WAV).
 
     The device restarts its index after every sync, so several sessions
-    can each hold an AUD_012. Names carry an epoch-ms prefix, so the
-    pair is the candidate whose prefix sits closest to the clip's."""
+    can each hold an AUD_012. The pair is the candidate whose epoch-ms
+    prefix sits closest to the clip's, within PAIR_WINDOW_MS. Returns
+    the input name unchanged when there is no pair."""
     stem = Path(name).stem.upper()
     if Path(name).suffix.lower() != ".avi" or "VID_" not in stem:
         return name
@@ -181,8 +196,30 @@ def resolve_audio_name(storage: MediaStorage, name: str) -> str:
             if (p := prefix_num(c)) is not None
         ]
         if numbered:
-            return min(numbered)[1]
+            distance, best = min(numbered)
+            return best if distance <= PAIR_WINDOW_MS else name
+        return name
     return candidates[0]
+
+
+def get_or_queue_transcript(storage: MediaStorage, name: str) -> tuple[str, dict | None]:
+    """The one transcript entry point for every client: validates the
+    kind, resolves a clip to its paired audio, returns (resolved_name,
+    record) — record None means a job was queued and the caller should
+    retry. Raises ValueError for anything that can never transcribe."""
+    if Path(name).suffix.lower() not in (".wav", ".avi"):
+        raise ValueError("Transcripts exist for .wav and .avi files only")
+    if storage.size(name) is None:
+        raise ValueError(f"No such file: {name}")
+    resolved = resolve_audio_name(storage, name)
+    if resolved == name and name.lower().endswith(".avi"):
+        raise ValueError(f"No paired audio for {name}")
+    if storage.size(resolved) is None:
+        raise ValueError(f"No such file: {resolved}")
+    record = transcribe.get_transcript(storage, resolved)
+    if record is None:
+        transcribe.queue_transcription(storage, resolved)
+    return resolved, record
 
 
 def _frame_lock(name: str) -> threading.Lock:
@@ -223,6 +260,10 @@ def get_or_extract_frames(
 def _extract_frames(
     storage: MediaStorage, name: str, every_s: float, max_frames: int, size: int
 ) -> dict:
+    # Drop the old index before touching any frame object: a crash
+    # mid-extraction must leave "no frames yet" (re-extract on the next
+    # request), never an index whose timestamps describe other bytes.
+    storage.delete_meta(meta.frames_index_key(name))
     with tempfile.NamedTemporaryFile(suffix=".avi") as tmp:
         for chunk in storage.stream(name):
             tmp.write(chunk)
@@ -277,8 +318,13 @@ def search_catalog(storage: MediaStorage, query: str) -> list[dict]:
                 _read_field, storage, meta.note_key(e.name), "note"
             )
         if meta.transcript_key(e.name) in transcribed:
+            # Through get_transcript, not a raw read: a transcript whose
+            # size fingerprint no longer matches the file must not keep
+            # matching searches after a replacement upload.
             futures[("transcript", e.name)] = _reader_pool.submit(
-                _read_field, storage, meta.transcript_key(e.name), "text"
+                lambda n=e.name, s=e.size: (
+                    transcribe.get_transcript(storage, n, s) or {}
+                ).get("text")
             )
     results = []
     for e in entries:
@@ -317,20 +363,16 @@ def search_catalog(storage: MediaStorage, query: str) -> list[dict]:
 @router.get("/media/{name}/transcript")
 async def get_transcript(name: str) -> JSONResponse:
     name = safe_name(name)
-    if Path(name).suffix.lower() not in (".wav", ".avi"):
-        raise HTTPException(
-            status_code=400, detail="Transcripts exist for .wav and .avi files only"
-        )
     storage = get_storage()
-    await run_in_threadpool(require_file, storage, name)
-    resolved = await run_in_threadpool(resolve_audio_name, storage, name)
-    if resolved == name and name.lower().endswith(".avi"):
-        raise HTTPException(status_code=404, detail=f"No paired audio for {name}")
-    await run_in_threadpool(require_file, storage, resolved)
-    record = await run_in_threadpool(transcribe.get_transcript, storage, resolved)
+    try:
+        resolved, record = await run_in_threadpool(
+            get_or_queue_transcript, storage, name
+        )
+    except ValueError as e:
+        status = 404 if "No " in str(e) else 400
+        raise HTTPException(status_code=status, detail=str(e)) from None
     if record is not None:
         return JSONResponse(record)
-    transcribe.queue_transcription(storage, resolved)
     return JSONResponse({"name": resolved, "status": "processing"}, status_code=202)
 
 

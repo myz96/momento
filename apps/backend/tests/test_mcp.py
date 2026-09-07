@@ -1,10 +1,3 @@
-"""The MCP tools run against real remote agents; pin their behavior.
-
-The tools are plain functions under the decorator, so they test
-directly against a temp media dir — imports, service wiring, and image
-serialization in one pass.
-"""
-
 import pytest
 from conftest import synthetic_avi, tiny_jpeg
 

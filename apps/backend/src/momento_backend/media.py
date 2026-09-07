@@ -53,6 +53,13 @@ def require_file(storage: MediaStorage, name: str) -> int:
     return size
 
 
+# Bounds for a credible capture time: past 2001, before 2100. A value
+# outside them (e.g. milliseconds sent as seconds) is ignored, never
+# stored — the upload itself always matters more than its timestamp.
+MTIME_MIN = 1_000_000_000
+MTIME_MAX = 4_102_444_800
+
+
 @router.post("", status_code=201)
 async def upload_media(
     file: UploadFile, mtime: int | None = Form(None)
@@ -60,7 +67,7 @@ async def upload_media(
     name = safe_name(file.filename or "")
     storage = get_storage()
     size = await run_in_threadpool(storage.save, name, file.file)
-    if mtime is not None and mtime > 0:
+    if mtime is not None and MTIME_MIN <= mtime <= MTIME_MAX:
         await run_in_threadpool(meta.record_mtime, storage, name, mtime)
     # Transcripts are free (local CPU), so produce them eagerly; every
     # other enrichment waits until an agent asks.

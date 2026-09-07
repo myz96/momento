@@ -13,7 +13,7 @@ from fastapi import HTTPException
 from mcp.server import MCPServer
 from mcp.server.mcpserver.utilities.types import Image
 
-from momento_backend import catalog, meta, transcribe
+from momento_backend import catalog, meta
 from momento_backend.media import get_storage, safe_name
 from momento_backend.storage import MediaStorage
 
@@ -89,18 +89,11 @@ def get_transcript(name: str) -> str:
     (pass the .avi name; the pair resolves server-side). Queues
     transcription when missing — retry in a minute."""
     name = _valid(name)
-    storage = get_storage()
-    _require(storage, name)
-    resolved = catalog.resolve_audio_name(storage, name)
-    if resolved == name and name.lower().endswith(".avi"):
-        raise ValueError(f"No paired audio for {name}")
-    _require(storage, resolved)
-    record = transcribe.get_transcript(storage, resolved)
-    if record is not None:
-        text = record["text"] or "(silence — the transcript is empty)"
-        return text if resolved == name else f"[{resolved}] {text}"
-    transcribe.queue_transcription(storage, resolved)
-    return "processing — call get_transcript again in about a minute"
+    resolved, record = catalog.get_or_queue_transcript(get_storage(), name)
+    if record is None:
+        return "processing — call get_transcript again in about a minute"
+    text = record["text"] or "(silence — the transcript is empty)"
+    return text if resolved == name else f"[{resolved}] {text}"
 
 
 @mcp.tool()

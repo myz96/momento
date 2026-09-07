@@ -43,6 +43,25 @@ async def test_uploaded_mtime_wins_over_upload_time(env) -> None:
     assert entry["mtime"] == 1757000000
 
 
+async def test_garbage_mtime_never_breaks_the_catalog(env) -> None:
+    client, media_dir = env
+    # Milliseconds sent as seconds: ignored at upload time.
+    await client.post(
+        "/media",
+        files={"file": ("PHOTO_003.JPG", b"x", "image/jpeg")},
+        data={"mtime": "1757000000000"},
+    )
+    # And a garbage value already stored must not 500 the listing.
+    (media_dir / "_meta").mkdir(parents=True, exist_ok=True)
+    (media_dir / "_meta" / "mtimes.json").write_text(
+        '{"PHOTO_003.JPG": 999999999999999}'
+    )
+    response = await client.get("/catalog")
+    assert response.status_code == 200
+    (record,) = response.json()
+    assert record["captured"] is None
+
+
 # --- transcripts -----------------------------------------------------------
 
 
@@ -90,6 +109,19 @@ async def test_transcript_of_a_clip_resolves_the_paired_audio(env) -> None:
     record = await wait_for_transcript(client, "1000_VID_001.AVI")
     # The pair is the audio file whose epoch prefix sits closest.
     assert record["name"] == "900_AUD_001.WAV"
+
+
+async def test_clip_with_no_same_session_audio_gets_no_pair(env) -> None:
+    client, _ = env
+    # The only AUD candidate is ~28 hours away — another session's file.
+    for name, payload in [
+        ("1757000000000_AUD_001.WAV", b"RIFFother"),
+        ("1757100000000_VID_001.AVI", synthetic_avi(5)),
+    ]:
+        await client.post("/media", files={"file": (name, payload, "x")})
+    response = await client.get("/media/1757100000000_VID_001.AVI/transcript")
+    assert response.status_code == 404
+    assert "No paired audio" in response.json()["detail"]
 
 
 async def test_transcript_rejects_non_media_and_missing(env) -> None:
@@ -252,3 +284,14 @@ async def test_search_covers_names_notes_and_transcripts(env) -> None:
     # Every token must match somewhere; a half-hit is no hit.
     hits = (await client.get("/search", params={"q": "sunset battery"})).json()
     assert hits == []
+
+
+async def test_search_ignores_stale_transcripts(env, monkeypatch) -> None:
+    client, media_dir = env
+    await client.post("/media", files={"file": ("AUD_030.WAV", b"RIFFf", "audio/wav")})
+    await wait_for_transcript(client, "AUD_030.WAV")
+    assert (await client.get("/search", params={"q": "battery"})).json() != []
+    # Replace the file's bytes; the cached words must stop matching.
+    monkeypatch.setenv("MOMENTO_FAKE_TRANSCRIPT", "different words entirely")
+    (media_dir / "AUD_030.WAV").write_bytes(b"RIFFdifferent")
+    assert (await client.get("/search", params={"q": "battery"})).json() == []
