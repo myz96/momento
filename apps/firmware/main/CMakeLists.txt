@@ -1,4 +1,5 @@
 idf_component_register(SRCS "momento_main.c"
+                            "haptics.c"
                             "sd_card.c"
                             "mic.c"
                             "avi_writer.c"

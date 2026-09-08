@@ -91,7 +91,27 @@ the device joins; mDNS does not resolve — use the device IP
   after the phone check.
 - Any failure: keep the monitor output — it is the debug artifact.
 
-## Deferred (needs Zach / parts)
+## Australia hardware session (~2026-09-22, with Zach)
 
-- Battery: LiPo soldering, then deep-sleep firmware.
-- Haptics: DRV2605L wiring, then the driver.
+Order matters: wire and test EVERYTHING on the breadboard first;
+desolder the header pins only after both checks pass. The breadboard is
+the debug harness — keep it until nothing needs probing.
+
+1. **Battery.** Solder the LiPo to the XIAO's battery pads (underside
+   of the board — separate from the header pins; charger is built in,
+   charges over the existing USB port). Check: device boots on battery
+   alone; record a clip; check runtime.
+2. **Haptics.** Wire the DRV2605L breakout: VIN→3V3, GND→GND,
+   SDA→GPIO5, SCL→GPIO6, motor to the driver's motor terminals. The
+   driver is already in the firmware (`haptics.c`, ERM library A,
+   Adafruit-breakout defaults). Check: boot log says "DRV2605L ready";
+   CAM press = one click; REC press = double click at start AND stop.
+   No chip wired = clean no-op ("haptics off") — nothing breaks.
+   LRA motor instead of ERM? Change REG_FEEDBACK bit 7 and the library
+   in haptics.c.
+3. Only now: desolder the header pins (flush-cut the spacer, pull pins
+   one at a time with the iron on the pad), wire buttons/LED/DRV
+   point-to-point, and print the v0 case (magnet ring on the
+   phone-facing wall, magnets away from the camera and mic).
+
+- Deep-sleep firmware comes after the battery proves itself.

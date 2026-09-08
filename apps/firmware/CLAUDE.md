@@ -33,7 +33,7 @@ The device is operated one-handed, often without looking at it.
 | **CAM button** (GPIO2) | Hold 1.5 s | — | Toggle Wi-Fi sync mode (LED blinks) |
 | **REC button** (GPIO1) | Single click | Double pulse | Start/stop a recording (MJPEG AVI clip + WAV audio) |
 
-The haptic feedback is intentionally different between buttons so the user knows which one they pressed without looking. (Haptics are wired up in hardware but not driven by the firmware yet.)
+The haptic feedback is intentionally different between buttons so the user knows which one they pressed without looking. The driver (`main/haptics.c`, DRV2605L at I2C 0x5A) is in the firmware; every call is a no-op until the chip is physically wired. The split: haptics answer "did my press land?", the LED shows device state.
 
 ## Wi-Fi Sync Mode
 

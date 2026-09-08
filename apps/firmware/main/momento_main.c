@@ -23,7 +23,6 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "driver/gpio.h"
-#include "driver/i2c_master.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -32,6 +31,7 @@
 
 #include "avi_writer.h"
 #include "ble_prov.h"
+#include "haptics.h"
 #include "mic.h"
 #include "sd_card.h"
 #include "wav_writer.h"
@@ -61,8 +61,6 @@ static const char *TAG = "momento";
 #define PIN_BTN_REC GPIO_NUM_1
 #define PIN_BTN_CAM GPIO_NUM_2
 #define PIN_LED     GPIO_NUM_4
-#define PIN_I2C_SDA GPIO_NUM_5
-#define PIN_I2C_SCL GPIO_NUM_6
 
 #define MAX_RECORD_US     (5LL * 60 * 1000 * 1000) /* recordings stream to SD */
 #define TARGET_FPS        15
@@ -186,35 +184,6 @@ static void gpio_setup(void)
     };
     gpio_config(&led);
     gpio_set_level(PIN_LED, 0);
-}
-
-static void i2c_scan(void)
-{
-    i2c_master_bus_config_t bus_cfg = {
-        .i2c_port = -1,
-        .sda_io_num = PIN_I2C_SDA,
-        .scl_io_num = PIN_I2C_SCL,
-        .clk_source = I2C_CLK_SRC_DEFAULT,
-        .glitch_ignore_cnt = 7,
-        .flags.enable_internal_pullup = true,
-    };
-    i2c_master_bus_handle_t bus;
-    if (i2c_new_master_bus(&bus_cfg, &bus) != ESP_OK) {
-        ESP_LOGW(TAG, "I2C bus init failed, scan skipped");
-        return;
-    }
-    int found = 0;
-    for (uint8_t addr = 0x08; addr < 0x78; addr++) {
-        if (i2c_master_probe(bus, addr, 50) == ESP_OK) {
-            ESP_LOGI(TAG, "I2C device found at 0x%02X%s", addr,
-                     addr == 0x5A ? " (DRV2605L haptics)" : "");
-            found++;
-        }
-    }
-    if (found == 0) {
-        ESP_LOGW(TAG, "I2C scan: no devices found");
-    }
-    i2c_del_master_bus(bus);
 }
 
 static int next_index(const char *pattern)
@@ -518,7 +487,7 @@ void app_main(void)
 {
     ESP_LOGI(TAG, "Momento button capture");
     gpio_setup();
-    i2c_scan();
+    haptics_init();
 
     esp_err_t nvs_err = nvs_flash_init();
     if (nvs_err == ESP_ERR_NVS_NO_FREE_PAGES ||
@@ -566,11 +535,13 @@ void app_main(void)
                 sync_mode();
             } else {
                 ESP_LOGI(TAG, "CAM button pressed");
+                haptics_click();
                 take_photo();
                 wait_release(PIN_BTN_CAM);
             }
         } else if (button_pressed(PIN_BTN_REC)) {
             ESP_LOGI(TAG, "REC button pressed, recording starts");
+            haptics_double_click();
             wait_release(PIN_BTN_REC);
             while (record_clip()) {
                 /* A stop press can land while the clip finalizes; it
@@ -581,6 +552,7 @@ void app_main(void)
                 }
                 ESP_LOGI(TAG, "Clip cap reached; rolling into a new clip");
             }
+            haptics_double_click();
             wait_release(PIN_BTN_REC);
         }
         vTaskDelay(pdMS_TO_TICKS(20));
